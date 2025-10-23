@@ -1,20 +1,39 @@
+# ==========================================
+# 🧠 COSA FA QUESTO PROGRAMMA
+# ------------------------------------------
+# Ti aiuta a costruire un libro partendo dal suo indice (TOC).
+# 1. Carichi un file con capitoli e sezioni (DOCX o PDF)
+# 2. Inserisci titolo, sottotitolo, autore e parole totali
+# 3. Premi “GENERA ALLOCAZIONE” e vedi come vengono divisi i blocchi
+# 4. Premi “CONFERMA E GENERA” e lui scrive davvero i testi (con OpenAI)
+# ==========================================
+
+# ==========================================
+# 📦 IMPORTO LE COSE CHE SERVONO
+# ==========================================
 import io
 import math
 import re
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 import streamlit as st
 from docx import Document
 from PyPDF2 import PdfReader
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.units import cm
+# provo a importare OpenAI
+try:
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    OPENAI_OK = True
+except Exception:
+    OPENAI_OK = False
 
-# ============= DATA MODELS ============= #
+
+# ==========================================
+# 🧱 COSTRUISCO LE “SCATOLE” PER I DATI
+# ==========================================
 
 @dataclass
 class Section:
@@ -39,8 +58,10 @@ class BookPlan:
     block_size: int
     chapters: List[Chapter] = field(default_factory=list)
 
-# ============= HELPERS ============= #
 
+# ==========================================
+# 🧹 COME PULISCO E RICONOSCO I TITOLI
+# ==========================================
 def normalize_heading(text: str) -> str:
     t = re.sub(r"\s+", " ", text or "").strip()
     t = re.sub(r"\.{2,}\s*\d+$", "", t).strip()
@@ -97,6 +118,10 @@ def extract_toc_from_pdf(file_bytes: bytes) -> List[Chapter]:
             ch.sections.append(Section(title="Sezione 1"))
     return chapters
 
+
+# ==========================================
+# ✏️ COME DIVIDO LE PAROLE E I BLOCCHI
+# ==========================================
 def allocate_words(chapters: List[Chapter], total_words: int, block_size: int) -> List[Chapter]:
     total_words = max(total_words, 1)
     block_size = max(block_size, 1)
@@ -115,56 +140,103 @@ def allocate_words(chapters: List[Chapter], total_words: int, block_size: int) -
             sec.blocks = math.ceil(sec.target_words / block_size)
     return chapters
 
-# ============= STREAMLIT UI ============= #
 
+# ==========================================
+# 🧠 COME GENERO IL TESTO VERO (con OpenAI)
+# ==========================================
+def generate_text_block(plan: BookPlan, ch: Chapter, sec: Section, block_index: int) -> str:
+    """Chiedo all’AI di scrivere un blocco di testo vero"""
+    if not OPENAI_OK:
+        return f"[SEGNAPOSTO] {sec.title} — Blocco {block_index+1} (500 parole)."
+
+    prompt = (
+        f"Scrivi circa 500 parole per un libro intitolato '{plan.title}' (autore: {plan.author}). "
+        f"Il capitolo è '{ch.title}', la sezione è '{sec.title}'. "
+        f"Non fare introduzioni generiche, scrivi subito contenuto concreto e fluido."
+    )
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Sei uno scrittore esperto. Scrivi testi chiari, interessanti e naturali."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+        return res.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[ERRORE AI] {e}"
+
+
+def generate_all(plan: BookPlan):
+    """Crea tutti i blocchi del libro"""
+    total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
+    done = 0
+    bar = st.progress(0, text="Sto scrivendo i blocchi...")
+    for ch in plan.chapters:
+        for sec in ch.sections:
+            sec.texts = []
+            for b in range(sec.blocks):
+                text = generate_text_block(plan, ch, sec, b)
+                sec.texts.append(text)
+                done += 1
+                bar.progress(done / total_blocks, text=f"Blocchi completati: {done}/{total_blocks}")
+    bar.empty()
+    st.success("✅ Tutti i blocchi generati con successo!")
+
+
+# ==========================================
+# 🖥️ LA PARTE GRAFICA (QUELLA CHE USI)
+# ==========================================
 st.set_page_config(page_title="Book Agent - Generatore", page_icon="📘", layout="wide")
-st.title("📘 Book Agent — Generatore Blocco 500 Parole")
+st.title("📘 Book Agent — Generatore blocchi da 500 parole")
+st.caption("Carica il TOC, genera l’allocazione e poi i testi reali.")
 
-st.markdown("Flusso in due fasi: caricamento e allocazione prima, generazione dopo.")
-
-# --- Sidebar Input ---
 with st.sidebar:
-    st.header("Dati libro")
+    st.header("📋 Dati del libro")
     title = st.text_input("Titolo")
     subtitle = st.text_input("Sottotitolo")
     author = st.text_input("Autore")
     total_words = st.number_input("Totale parole", min_value=1000, step=500, value=20000)
-    block_size = 500  # fisso
-    st.info(f"I blocchi sono di default da {block_size} parole.")
+    block_size = 500
+    st.info(f"I blocchi sono sempre da {block_size} parole.")
 
-# --- Upload TOC ---
-uploaded = st.file_uploader("Carica TOC (DOCX o PDF)", type=["docx", "pdf"])
+uploaded = st.file_uploader("Carica il tuo TOC (DOCX o PDF)", type=["docx", "pdf"])
 
-# Stato intermedio
+# Creo “memoria” temporanea
 if "chapters" not in st.session_state:
     st.session_state["chapters"] = None
 if "allocation_done" not in st.session_state:
     st.session_state["allocation_done"] = False
 
-# Step 1: Genera allocazione
+# --- STEP 1: genera allocazione ---
 if uploaded and title and subtitle and author and total_words:
     if st.button("GENERA ALLOCAZIONE", type="primary", use_container_width=True):
         data = uploaded.read()
         fname = uploaded.name.lower()
         chapters = extract_toc_from_docx(data) if fname.endswith(".docx") else extract_toc_from_pdf(data)
         if not chapters:
-            st.error("Nessun capitolo riconosciuto. Usa Heading 1 e Heading 2 nel DOCX.")
+            st.error("Non ho trovato capitoli. Usa Heading 1 e Heading 2 nel DOCX.")
         else:
             chapters = allocate_words(chapters, total_words, block_size)
             st.session_state["chapters"] = chapters
             st.session_state["allocation_done"] = True
 
-# Step 2: Visualizza allocazione
+# --- STEP 2: mostra struttura e bottone “Conferma e Genera” ---
 if st.session_state["allocation_done"] and st.session_state["chapters"]:
     chapters = st.session_state["chapters"]
-    st.subheader("📖 Struttura allocata")
+    st.subheader("📚 Struttura del libro divisa in blocchi")
     for i, ch in enumerate(chapters, start=1):
-        with st.expander(f"Capitolo {i}: {ch.title} — parole {ch.target_words} — blocchi {ch.blocks}"):
+        with st.expander(f"Capitolo {i}: {ch.title} — {ch.target_words} parole — {ch.blocks} blocchi"):
             for j, sec in enumerate(ch.sections, start=1):
                 st.write(f"• {sec.title} — {sec.target_words} parole — {sec.blocks} blocchi")
 
     if st.button("CONFERMA E GENERA", type="primary", use_container_width=True):
-        st.info("⚙️ Generazione contenuti in corso... (questa parte verrà implementata nella prossima versione)")
-        st.success("Allocazione confermata. Generazione pronta.")
+        plan = BookPlan(
+            title=title, subtitle=subtitle, author=author,
+            total_words=total_words, block_size=block_size, chapters=chapters
+        )
+        generate_all(plan)
+
 else:
-    st.warning("Carica TOC e compila tutti i campi prima di generare l’allocazione.")
+    st.warning("Carica il TOC e inserisci tutti i dati prima di cliccare 'GENERA ALLOCAZIONE'.")
