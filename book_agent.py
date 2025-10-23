@@ -1,462 +1,428 @@
-# book_agent.py
-# Requisiti: pip install openai python-docx reportlab pydantic
-# Ambiente: esporta OPENAI_API_KEY
-# Nota: la TOC in DOCX si aggiorna in Word con Aggiorna campo. Nel PDF creiamo una TOC semplice.
-
-import os
+import io
 import math
-import json
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional, Tuple
+import re
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
-from pydantic import BaseModel, Field, validator
+import streamlit as st
 from docx import Document
-from docx.shared import Pt, Cm
+from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from reportlab.lib.pagesizes import A4
+from docx.oxml.shared import OxmlElement, qn
+from PyPDF2 import PdfReader
+from reportlab.lib.pagesizes import A4, letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
 
-try:
-    from openai import OpenAI
-    _OPENAI_AVAILABLE = True
-except Exception:
-    _OPENAI_AVAILABLE = False
 
-# -------------- Config --------------
-MODEL = "gpt-4.1-mini"
-BLOCK_WORDS = 500
-DEFAULT_DISCLAIMER = (
-    "Disclaimer: il contenuto di questo libro ha scopo informativo. "
-    "Non costituisce consulenza professionale. Verificare sempre le informazioni "
-    "critiche e rivolgersi a un professionista qualificato quando necessario."
-)
-COPYRIGHT_TEMPLATE = "© {year} {author}. Tutti i diritti riservati."
+# ============ Data models ============
 
-# -------------- Data models --------------
-class Section(BaseModel):
-    id: str
+@dataclass
+class Section:
     title: str
-    words: int
-    blocks: int
+    target_words: int = 0
+    blocks: int = 0
 
-class Chapter(BaseModel):
-    number: int
+
+@dataclass
+class Chapter:
     title: str
-    words: int
-    sections: List[Section] = Field(default_factory=list)
+    sections: List[Section] = field(default_factory=list)
+    target_words: int = 0
+    blocks: int = 0
 
-class Project(BaseModel):
+
+@dataclass
+class BookPlan:
     title: str
     subtitle: str
-    author: str
     total_words: int
-    chapters: int
-    use_sections: bool
-    sections_per_chapter: int = 0
-    toc: List[Chapter] = Field(default_factory=list)
-    block_size: int = BLOCK_WORDS
-    tone: str = "professionale, chiaro, concreto"
-    style_guide: str = "corpo 11 pt, Calibri, giustificato; titoli coerenti; esempi pratici"
+    block_size: int
+    chapters: List[Chapter] = field(default_factory=list)
 
-    @validator("sections_per_chapter")
-    def check_sections(cls, v, values):
-        if values.get("use_sections") and v < 1:
-            raise ValueError("sections_per_chapter deve essere maggiore di zero se use_sections è True")
-        return v
 
-# -------------- LLM helper --------------
-def _client() -> OpenAI:
-    if not _OPENAI_AVAILABLE:
-        raise RuntimeError("Libreria openai non disponibile")
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY non impostata")
-    return OpenAI()
+# ============ TOC extraction utilities ============
 
-def llm(system: str, user: str, temperature: float = 0.2, max_tokens: int = 1800) -> str:
-    client = _client()
-    rsp = client.chat.completions.create(
-        model=MODEL,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    return rsp.choices[0].message.content.strip()
+H1_PATTERNS = [
+    r"^\s*(?:chapter|capitolo)\s+\d+[:.\-\s]+(.+)$",
+    r"^\s*\d+\.\s+(.+)$",
+    r"^\s*[IVXLC]+\.\s+(.+)$",
+]
+H2_PATTERNS = [
+    r"^\s*(?:section|sezione)\s+\d+(?:\.\d+)?[:.\-\s]+(.+)$",
+    r"^\s*\d+\.\d+\.\s+(.+)$",
+    r"^\s*\d+\)\s+(.+)$",
+]
 
-# -------------- TOC generation and allocation --------------
-def allocate_words(total: int, n: int) -> List[int]:
-    base = total // n
-    rem = total % n
-    alloc = [base] * n
-    for i in range(rem):
-        alloc[i] += 1
-    return alloc
+def _match_first(text: str, patterns: List[str]) -> Optional[str]:
+    for pat in patterns:
+        m = re.match(pat, text, flags=re.IGNORECASE)
+        if m:
+            g = m.group(1).strip()
+            if g:
+                return g
+    return None
 
-def build_toc(project: Project) -> Project:
-    # Genera titoli capitolo via LLM, poi ripartisce parole e sezioni
-    system = "Sei un editor e outliner di saggistica. Fornisci titoli efficaci, chiari e non clickbait."
-    prompt = f"""
-Libro: {project.title}
-Sottotitolo: {project.subtitle}
-Autore: {project.author}
-Obiettivo: sommario di {project.chapters} capitoli.
-Vincoli: titoli concisi max 8 parole, nessun numero all'inizio. Niente punti finali.
-Fornisci JSON con array "chapters": [{{"title": "..."}}] lungo {project.chapters}.
-"""
-    raw = llm(system, prompt, temperature=0.3, max_tokens=800)
-    try:
-        data = json.loads(raw)
-        ch_titles = [c["title"] for c in data["chapters"]]
-        if len(ch_titles) != project.chapters:
-            raise ValueError("numero capitoli non coerente")
-    except Exception:
-        # fallback deterministico
-        ch_titles = [f"Capitolo di tema: {i+1}" for i in range(project.chapters)]
+def normalize_heading(text: str) -> str:
+    t = re.sub(r"\s+", " ", text or "").strip()
+    # Rimuovi puntini di riempimento e numeri pagina tipici degli indici PDF
+    t = re.sub(r"\.{2,}\s*\d+$", "", t).strip()
+    return t
 
-    per_chapter = allocate_words(project.total_words, project.chapters)
-    toc: List[Chapter] = []
-    for idx, words in enumerate(per_chapter):
-        chap = Chapter(number=idx + 1, title=ch_titles[idx], words=words, sections=[])
-        if project.use_sections:
-            # ripartizione in sezioni per capitolo
-            per_section = allocate_words(words, project.sections_per_chapter)
-            sections = []
-            # titoli sezioni via LLM
-            system_s = "Sei un editor. Fornisci titoli di sezioni concreti e non sensazionalistici."
-            prompt_s = f"""
-Capitolo: {chap.title}
-Genera {project.sections_per_chapter} titoli di sezione, concisi.
-JSON: {{"sections": [{{"title": "..."}}]}}
-"""
-            raw_s = llm(system_s, prompt_s, temperature=0.3, max_tokens=600)
-            try:
-                data_s = json.loads(raw_s)
-                sec_titles = [s["title"] for s in data_s["sections"]]
-                if len(sec_titles) != project.sections_per_chapter:
-                    raise ValueError
-            except Exception:
-                sec_titles = [f"Sezione {j+1}" for j in range(project.sections_per_chapter)]
-            for j, w in enumerate(per_section):
-                blocks = max(1, round(w / project.block_size))
-                sections.append(Section(
-                    id=f"{chap.number}.{j+1}",
-                    title=sec_titles[j],
-                    words=w,
-                    blocks=blocks,
-                ))
-            chap.sections = sections
-        else:
-            # nessuna sezione, si generano blocchi a livello capitolo con una sola sezione logica
-            blocks = max(1, round(words / project.block_size))
-            chap.sections = [Section(id=f"{chap.number}.1", title="Contenuto", words=words, blocks=blocks)]
-        toc.append(chap)
+def guess_is_heading(line: str) -> bool:
+    # Heuristics: line with few words and Title Case or ALL CAPS often indicates heading
+    clean = normalize_heading(line)
+    if not clean:
+        return False
+    words = clean.split()
+    if len(words) <= 12:
+        if clean.isupper():
+            return True
+        titlecase_ratio = sum(1 for w in words if w[:1].isupper()) / max(len(words), 1)
+        if titlecase_ratio >= 0.6:
+            return True
+    # Numeric or roman numerals prefix
+    if re.match(r"^\s*(?:\d+|[IVXLC]+)[\.\)\s]", clean):
+        return True
+    return False
 
-    project.toc = toc
-    return project
+def extract_toc_from_docx(file_bytes: bytes) -> List[Chapter]:
+    doc = Document(io.BytesIO(file_bytes))
+    chapters: List[Chapter] = []
+    current_ch: Optional[Chapter] = None
 
-def summarize_toc(project: Project) -> str:
-    lines = []
-    for ch in project.toc:
-        lines.append(f"Capitolo {ch.number} - {ch.title}  [{ch.words} parole]")
-        for s in ch.sections:
-            lines.append(f"  Sezione {s.id} - {s.title}  [{s.words} parole, {s.blocks} blocchi da ~{project.block_size}]")
-    return "\n".join(lines)
-
-# -------------- Block prompts and writing --------------
-def write_block(project: Project, ch: Chapter, sec: Section, block_index: int) -> str:
-    # block_index inizia da 1
-    target_words = max(120, round(sec.words / sec.blocks))
-    system = "Sei un writer professionale. Stile chiaro, denso di utilita, senza ridondanze. Evita claim medici o legali."
-    user = f"""
-Libro: {project.title}
-Sottotitolo: {project.subtitle}
-Autore: {project.author}
-Tono: {project.tone}
-Style guide: {project.style_guide}
-
-Stai scrivendo un blocco di circa {target_words} parole.
-Capitolo {ch.number}: {ch.title}
-Sezione {sec.id}: {sec.title}
-Blocco: {block_index} di {sec.blocks}
-
-Istruzioni di struttura
-1. Micro hook iniziale orientato al beneficio.
-2. Sviluppo con un esempio o micro caso concreto.
-3. Piccola checklist di 3 punti finali con verbi di azione.
-
-Scrivi solo il testo definitivo, niente etichette o prefissi elenco.
-"""
-    text = llm(system, user, temperature=0.35, max_tokens=min(1200, target_words + 200))
-    return text
-
-# -------------- DOCX export --------------
-def export_docx(project: Project, blocks_map: Dict[str, List[str]], out_path: str,
-                disclaimer: str = DEFAULT_DISCLAIMER) -> str:
-    doc = Document()
-
-    # stile base
-    style = doc.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(11)
-
-    # front matter
-    p_title = doc.add_paragraph(project.title)
-    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p_title.runs[0]
-    r.bold = True
-    r.font.size = Pt(20)
-
-    p_sub = doc.add_paragraph(project.subtitle)
-    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    p_auth = doc.add_paragraph(f"Di {project.author}")
-    p_auth.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    doc.add_page_break()
-
-    # copyright e disclaimer
-    from datetime import datetime
-    year = datetime.now().year
-    doc.add_paragraph(COPYRIGHT_TEMPLATE.format(year=year, author=project.author))
-    doc.add_paragraph(disclaimer)
-    doc.add_page_break()
-
-    # TOC semplice come elenco. In Word la TOC formattata si può aggiungere e aggiornare.
-    toc_head = doc.add_paragraph("Indice")
-    toc_head.runs[0].bold = True
-    for ch in project.toc:
-        doc.add_paragraph(f"Capitolo {ch.number}. {ch.title}")
-        for s in ch.sections:
-            doc.add_paragraph(f"  {s.id} {s.title}")
-    doc.add_page_break()
-
-    # contenuti
-    for ch in project.toc:
-        h1 = doc.add_paragraph(f"Capitolo {ch.number}. {ch.title}")
-        h1.runs[0].bold = True
-        h1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        for s in ch.sections:
-            h2 = doc.add_paragraph(f"{s.id} {s.title}")
-            h2.runs[0].bold = True
-
-            blocks = blocks_map.get(s.id, [])
-            for b in blocks:
-                for para in b.split("\n\n"):
-                    p = doc.add_paragraph(para.strip())
-                    p.paragraph_format.first_line_indent = Cm(0.5)
-
-    doc.save(out_path)
-    return out_path
-
-# -------------- PDF export --------------
-def export_pdf(project: Project, blocks_map: Dict[str, List[str]], out_path: str,
-               disclaimer: str = DEFAULT_DISCLAIMER) -> str:
-    c = canvas.Canvas(out_path, pagesize=A4)
-    width, height = A4
-    left = 2.2 * cm
-    top = height - 2.5 * cm
-    line_height = 14
-
-    def draw_paragraph(text: str, start_y: float) -> float:
-        y = start_y
-        for line in text.split("\n"):
-            wrapped = wrap_text(line, 90)
-            for w in wrapped:
-                if y < 2.5 * cm:
-                    c.showPage()
-                    y = top
-                c.drawString(left, y, w)
-                y -= line_height
-        return y
-
-    # front
-    c.setFont("Times-Roman", 20)
-    c.drawCentredString(width / 2, top, project.title)
-    c.setFont("Times-Roman", 14)
-    c.drawCentredString(width / 2, top - 30, project.subtitle)
-    c.drawCentredString(width / 2, top - 55, f"Di {project.author}")
-    c.showPage()
-
-    # disclaimer
-    c.setFont("Times-Roman", 11)
-    y = top
-    y = draw_paragraph(COPYRIGHT_TEMPLATE.format(year=get_year(), author=project.author), y)
-    y -= line_height
-    y = draw_paragraph(disclaimer, y)
-    c.showPage()
-
-    # indice semplice
-    y = top
-    c.setFont("Times-Roman", 12)
-    c.drawString(left, y, "Indice")
-    y -= line_height * 2
-    for ch in project.toc:
-        y = draw_paragraph(f"Capitolo {ch.number}. {ch.title}", y)
-        for s in ch.sections:
-            y = draw_paragraph(f"  {s.id} {s.title}", y)
-    c.showPage()
-
-    # contenuti
-    for ch in project.toc:
-        y = top
-        c.setFont("Times-Roman", 14)
-        c.drawCentredString(width / 2, y, f"Capitolo {ch.number}. {ch.title}")
-        y -= line_height * 2
-        c.setFont("Times-Roman", 11)
-        for s in ch.sections:
-            if y < 3.5 * cm:
-                c.showPage()
-                y = top
-            c.setFont("Times-Roman", 12)
-            c.drawString(left, y, f"{s.id} {s.title}")
-            y -= line_height * 1.5
-            c.setFont("Times-Roman", 11)
-            for b in blocks_map.get(s.id, []):
-                for para in b.split("\n\n"):
-                    y = draw_paragraph(para.strip(), y)
-                    y -= line_height * 0.5
-            y -= line_height
-
-    c.save()
-    return out_path
-
-def wrap_text(text: str, width: int) -> List[str]:
-    words = text.split()
-    lines = []
-    cur = []
-    cur_len = 0
-    for w in words:
-        if cur_len + len(w) + (1 if cur else 0) <= width:
-            cur.append(w)
-            cur_len += len(w) + (1 if cur_len > 0 else 0)
-        else:
-            lines.append(" ".join(cur))
-            cur = [w]
-            cur_len = len(w)
-    if cur:
-        lines.append(" ".join(cur))
-    return lines
-
-def get_year() -> int:
-    from datetime import datetime
-    return datetime.now().year
-
-# -------------- Interactive CLI --------------
-def ask_int(prompt_text: str, minimum: int = 1) -> int:
-    while True:
-        try:
-            v = int(input(prompt_text).strip())
-            if v >= minimum:
-                return v
-        except Exception:
-            pass
-        print(f"Inserisci un intero maggiore o uguale a {minimum}.")
-
-def yesno(prompt_text: str) -> bool:
-    v = input(prompt_text + " [y/n]: ").strip().lower()
-    return v in ["y", "yes", "s", "si"]
-
-def cli():
-    print("Configurazione progetto")
-    title = input("Titolo: ").strip()
-    subtitle = input("Sottotitolo: ").strip()
-    author = input("Autore: ").strip()
-    total_words = ask_int("Numero parole totali: ", minimum=5000)
-    chapters = ask_int("Numero capitoli: ", minimum=3)
-    use_sections = yesno("Vuoi dividere i capitoli in sezioni")
-    sections_per = 0
-    if use_sections:
-        sections_per = ask_int("Quante sezioni per capitolo: ", minimum=1)
-
-    project = Project(
-        title=title,
-        subtitle=subtitle,
-        author=author,
-        total_words=total_words,
-        chapters=chapters,
-        use_sections=use_sections,
-        sections_per_chapter=sections_per,
-    )
-
-    # TOC loop
-    while True:
-        project = build_toc(project)
-        print("\nProposta TOC con allocazione parole")
-        print(summarize_toc(project))
-        if yesno("Confermi il TOC proposto"):
-            break
-        action = input("Digita 'm' per modificare manualmente, 'r' per rigenerare: ").strip().lower()
-        if action == "m":
-            # modifica titoli o parole per capitolo
-            for ch in project.toc:
-                new_t = input(f"Titolo cap {ch.number} [{ch.title}] lascia vuoto per mantenere: ").strip()
-                if new_t:
-                    ch.title = new_t
-                new_w = input(f"Parole cap {ch.number} [{ch.words}] lascia vuoto per mantenere: ").strip()
-                if new_w.isdigit():
-                    ch.words = int(new_w)
-                # ricalcolo sezioni e blocchi
-                if project.use_sections:
-                    per_section = allocate_words(ch.words, project.sections_per_chapter)
-                    for j, s in enumerate(ch.sections):
-                        s.words = per_section[j]
-                        s.blocks = max(1, round(s.words / project.block_size))
-                else:
-                    ch.sections[0].words = ch.words
-                    ch.sections[0].blocks = max(1, round(ch.words / project.block_size))
-        else:
-            # rigenera
+    for p in doc.paragraphs:
+        text = normalize_heading(p.text)
+        if not text:
             continue
 
-    # scrittura blocco per blocco
-    blocks_map: Dict[str, List[str]] = {}
-    print("\nScrittura contenuti a blocchi. Verrà richiesto di procedere blocco per blocco.")
-    for ch in project.toc:
-        for s in ch.sections:
-            blocks_map.setdefault(s.id, [])
-            for bidx in range(1, s.blocks + 1):
-                if not yesno(f"Generare blocco {bidx}/{s.blocks} per sezione {s.id}"):
-                    print("Interruzione richiesta. Si procede a export con quanto disponibile.")
-                    return finalize(project, blocks_map)
-                text = write_block(project, ch, s, bidx)
-                print("\n--- Testo generato ---\n")
-                print(text[:1000] + ("..." if len(text) > 1000 else ""))
-                if yesno("Accetti questo blocco"):
-                    blocks_map[s.id].append(text)
-                else:
-                    if yesno("Rigenero il blocco"):
-                        text = write_block(project, ch, s, bidx)
-                        print("\n--- Nuova versione ---\n")
-                        print(text[:1000] + ("..." if len(text) > 1000 else ""))
-                        if yesno("Accetti questa versione"):
-                            blocks_map[s.id].append(text)
-                    else:
-                        print("Blocco saltato.")
+        style_name = (getattr(p.style, "name", "") or "").lower()
 
-    finalize(project, blocks_map)
+        if "heading 1" in style_name or _match_first(text, H1_PATTERNS) or guess_is_heading(text):
+            # If style says H1, prefer raw text; otherwise, use matched group if present
+            h = text
+            matched = _match_first(text, H1_PATTERNS)
+            if matched:
+                h = matched
+            current_ch = Chapter(title=h)
+            chapters.append(current_ch)
+            continue
 
-def finalize(project: Project, blocks_map: Dict[str, List[str]]):
-    os.makedirs("output", exist_ok=True)
-    docx_path = f"output/{sanitize(project.title)}.docx"
-    pdf_path = f"output/{sanitize(project.title)}.pdf"
-    export_docx(project, blocks_map, docx_path)
-    export_pdf(project, blocks_map, pdf_path)
-    # salva anche JSON progetto
-    with open(f"output/{sanitize(project.title)}.json", "w", encoding="utf-8") as f:
-        json.dump(project.dict(), f, ensure_ascii=False, indent=2)
-    print("\nExport completato")
-    print(f"DOCX: {docx_path}")
-    print(f"PDF:  {pdf_path}")
-    print(f"JSON: output/{sanitize(project.title)}.json")
+        if current_ch:
+            if "heading 2" in style_name or _match_first(text, H2_PATTERNS):
+                h = text
+                matched = _match_first(text, H2_PATTERNS)
+                if matched:
+                    h = matched
+                current_ch.sections.append(Section(title=h))
+    # Guarantee at least one section per chapter
+    for ch in chapters:
+        if not ch.sections:
+            ch.sections.append(Section(title="Sezione 1"))
+    return chapters
 
-def sanitize(name: str) -> str:
-    keep = "".join(c for c in name if c.isalnum() or c in " ._-")
-    return keep.strip().replace(" ", "_")
+def extract_toc_from_pdf(file_bytes: bytes) -> List[Chapter]:
+    reader = PdfReader(io.BytesIO(file_bytes))
+    lines: List[str] = []
+    for page in reader.pages:
+        try:
+            txt = page.extract_text() or ""
+        except Exception:
+            txt = ""
+        for raw in txt.splitlines():
+            s = normalize_heading(raw)
+            if s:
+                lines.append(s)
 
-if __name__ == "__main__":
-    cli()
+    chapters: List[Chapter] = []
+    current_ch: Optional[Chapter] = None
+
+    for ln in lines:
+        # Try H1 patterns
+        h1 = _match_first(ln, H1_PATTERNS)
+        h2 = _match_first(ln, H2_PATTERNS)
+
+        if h1:
+            current_ch = Chapter(title=h1)
+            chapters.append(current_ch)
+            continue
+
+        if h2 and current_ch:
+            current_ch.sections.append(Section(title=h2))
+            continue
+
+        # Fallback heuristic if no explicit patterns
+        if guess_is_heading(ln):
+            if not current_ch:
+                current_ch = Chapter(title=ln)
+                chapters.append(current_ch)
+            else:
+                # If chapter exists and last action was chapter without sections, treat as section
+                current_ch.sections.append(Section(title=ln))
+
+    # Guarantee at least one section per chapter
+    for ch in chapters:
+        if not ch.sections:
+            ch.sections.append(Section(title="Sezione 1"))
+    return chapters
+
+
+# ============ Allocation ============
+
+def allocate_words(chapters: List[Chapter], total_words: int, block_size: int) -> List[Chapter]:
+    if total_words <= 0:
+        total_words = 1
+    if block_size <= 0:
+        block_size = 500
+
+    n_ch = max(len(chapters), 1)
+    base_per_ch = total_words // n_ch
+    remainder = total_words % n_ch
+
+    for idx, ch in enumerate(chapters):
+        ch_words = base_per_ch + (1 if idx < remainder else 0)
+        ch.target_words = ch_words
+        ch.blocks = math.ceil(ch_words / block_size)
+
+        n_sec = max(len(ch.sections), 1)
+        sec_base = ch_words // n_sec
+        sec_rem = ch_words % n_sec
+
+        for j, sec in enumerate(ch.sections):
+            sec_words = sec_base + (1 if j < sec_rem else 0)
+            sec.target_words = sec_words
+            sec.blocks = math.ceil(sec_words / block_size)
+
+    return chapters
+
+
+# ============ DOCX builder ============
+
+def _set_section_margins(doc: Document, top_cm=2.0, bottom_cm=2.0, left_cm=2.0, right_cm=2.0):
+    for section in doc.sections:
+        section.top_margin = CmSafe(top_cm)
+        section.bottom_margin = CmSafe(bottom_cm)
+        section.left_margin = CmSafe(left_cm)
+        section.right_margin = CmSafe(right_cm)
+
+def CmSafe(x: float):
+    # Helper to avoid import issues if user wants to tweak margins
+    return Inches(x / 2.54)
+
+def add_styled_heading(p, bold=True, size=16, align_center=False):
+    run = p.add_run()
+    run.bold = bold
+    run.font.size = Pt(size)
+    if align_center:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    return run
+
+def create_docx(plan: BookPlan) -> bytes:
+    doc = Document()
+
+    # Margins
+    _set_section_margins(doc, 2.0, 2.0, 2.0, 2.0)
+
+    # Title page
+    p_title = doc.add_paragraph()
+    run_t = add_styled_heading(p_title, bold=True, size=24, align_center=True)
+    run_t.text = plan.title
+
+    if plan.subtitle.strip():
+        p_sub = doc.add_paragraph()
+        run_s = add_styled_heading(p_sub, bold=False, size=14, align_center=True)
+        run_s.text = plan.subtitle
+
+    # Spacer
+    doc.add_paragraph()
+
+    # Metadata paragraph
+    meta = doc.add_paragraph()
+    meta_run = meta.add_run(f"Totale parole: {plan.total_words} — Dimensione blocchi: {plan.block_size}")
+    meta_run.font.size = Pt(10)
+
+    # Content
+    for ch in plan.chapters:
+        # Chapter heading
+        p = doc.add_paragraph()
+        run = add_styled_heading(p, bold=True, size=18, align_center=False)
+        run.text = ch.title
+
+        # Chapter meta
+        cm = doc.add_paragraph()
+        cm_run = cm.add_run(f"Parole assegnate: {ch.target_words}  Blocchi: {ch.blocks}")
+        cm_run.font.size = Pt(10)
+
+        for sec in ch.sections:
+            sp = doc.add_paragraph()
+            srun = add_styled_heading(sp, bold=False, size=14, align_center=False)
+            srun.text = sec.title
+
+            sm = doc.add_paragraph()
+            sm_run = sm.add_run(f"Parole assegnate: {sec.target_words}  Blocchi: {sec.blocks}")
+            sm_run.font.size = Pt(10)
+
+            # Insert block placeholders
+            for b in range(1, sec.blocks + 1):
+                bp = doc.add_paragraph()
+                br = bp.add_run(f"[{sec.title}] Blocco {b} di {sec.blocks} — target {plan.block_size} parole")
+                br.italic = True
+                br.font.size = Pt(10)
+                # Add a spacer paragraph for content writing
+                doc.add_paragraph()
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ============ PDF builder ============
+
+def create_pdf(plan: BookPlan, pagesize: str = "A4") -> bytes:
+    if str(pagesize).lower() == "letter":
+        psize = letter
+    else:
+        psize = A4
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=psize)
+    width, height = psize
+
+    left = 2.0 * cm
+    top = height - 2.0 * cm
+    line_h = 14
+
+    def write_line(text: str, y: int, bold: bool = False, size: int = 12):
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        c.drawString(left, y, text)
+
+    # Title page
+    y = top - 40
+    write_line(plan.title, y, bold=True, size=20)
+    y -= 24
+    if plan.subtitle.strip():
+        write_line(plan.subtitle, y, bold=False, size=12)
+        y -= 12
+
+    y -= 20
+    write_line(f"Totale parole: {plan.total_words}  Dimensione blocchi: {plan.block_size}", y, size=10)
+    c.showPage()
+
+    # Content pages
+    y = top
+    for ch in plan.chapters:
+        # Chapter
+        if y < 80:
+            c.showPage()
+            y = top
+        write_line(ch.title, y, bold=True, size=16)
+        y -= line_h
+        write_line(f"Parole assegnate: {ch.target_words}  Blocchi: {ch.blocks}", y, size=9)
+        y -= line_h
+
+        for sec in ch.sections:
+            if y < 80:
+                c.showPage()
+                y = top
+            write_line(sec.title, y, bold=False, size=12)
+            y -= line_h
+            write_line(f"Parole assegnate: {sec.target_words}  Blocchi: {sec.blocks}", y, size=9)
+            y -= line_h
+
+            for b in range(1, sec.blocks + 1):
+                if y < 80:
+                    c.showPage()
+                    y = top
+                write_line(f"[{sec.title}] Blocco {b} di {sec.blocks}  target {plan.block_size} parole", y, size=9)
+                y -= line_h
+                # Space for writing
+                y -= line_h * 2
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+# ============ Streamlit App ============
+
+st.set_page_config(page_title="Book Agent — Splitter 500", page_icon="📚", layout="wide")
+
+st.title("Book Agent — Generatore blocchi 500 parole")
+st.caption("Upload TOC in DOCX o PDF, allocazione parole e split automatico senza conferme. Esporta DOCX e PDF.")
+
+with st.sidebar:
+    st.header("Parametri")
+    input_title = st.text_input("Titolo libro", value="")
+    input_subtitle = st.text_input("Sottotitolo", value="")
+
+    total_words = st.number_input("Totale parole target", min_value=1, step=500, value=20000)
+    block_size = st.number_input("Dimensione blocchi", min_value=1, step=50, value=500)
+    pdf_pagesize = st.selectbox("Formato PDF", options=["A4", "Letter"], index=0)
+
+    st.markdown("---")
+    st.caption("Suggerimento: i blocchi sono calcolati con arrotondamento per eccesso per coprire l’obiettivo di parole.")
+
+st.subheader("Carica il tuo TOC")
+uploaded = st.file_uploader("Seleziona un file DOCX o PDF contenente i titoli di capitoli e sezioni", type=["docx", "pdf"])
+
+placeholder_report = st.empty()
+colA, colB = st.columns(2)
+
+if uploaded is not None:
+    fname = uploaded.name.lower()
+    data = uploaded.read()
+
+    try:
+        if fname.endswith(".docx"):
+            chapters = extract_toc_from_docx(data)
+        else:
+            chapters = extract_toc_from_pdf(data)
+
+        if not chapters:
+            st.error("Nessun capitolo riconosciuto. Verifica che il file contenga un indice leggibile oppure usa stili Heading 1 e Heading 2 in DOCX.")
+        else:
+            chapters = allocate_words(chapters, total_words, block_size)
+            plan = BookPlan(
+                title=input_title.strip() or "Titolo",
+                subtitle=input_subtitle.strip(),
+                total_words=total_words,
+                block_size=block_size,
+                chapters=chapters,
+            )
+
+            # Report sintetico a schermo
+            with placeholder_report.container():
+                st.success("TOC estratto e allocato correttamente.")
+                st.write(f"Capitoli: {len(plan.chapters)}  |  Totale parole: {plan.total_words}  |  Blocchi da {plan.block_size}")
+
+                for idx, ch in enumerate(plan.chapters, start=1):
+                    with st.expander(f"Capitolo {idx}: {ch.title}  —  parole {ch.target_words}  —  blocchi {ch.blocks}"):
+                        for j, sec in enumerate(ch.sections, start=1):
+                            st.write(f"Sezione {j}: {sec.title}  |  parole {sec.target_words}  |  blocchi {sec.blocks}")
+
+            # Generazione file senza chiedere conferme
+            docx_bytes = create_docx(plan)
+            pdf_bytes = create_pdf(plan, pagesize=pdf_pagesize)
+
+            with colA:
+                st.download_button(
+                    label="Scarica DOCX",
+                    data=docx_bytes,
+                    file_name="book_plan_blocks.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )
+            with colB:
+                st.download_button(
+                    label="Scarica PDF",
+                    data=pdf_bytes,
+                    file_name="book_plan_blocks.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+    except Exception as e:
+        st.error(f"Errore durante l’elaborazione: {e}")
+
+else:
+    st.info("Carica un file DOCX o PDF con l’indice del libro. Per DOCX usa Heading 1 per i capitoli e Heading 2 per le sezioni.")
