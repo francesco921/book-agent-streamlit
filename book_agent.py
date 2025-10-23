@@ -189,14 +189,19 @@ if uploaded_file:
             detected = "auto"
     st.session_state.detected_lang = detected
 
-    # --- Show captured TOC ---
-    st.success(f"Detected language: **{detected.upper()}**")
+    # ---------- PENDING PATCH (MUST RUN BEFORE WIDGET RENDERING) ----------
+    # If AI refinement set a pending value, apply it now (before widget creation)
+    if "toc_text_editable_pending" in st.session_state:
+        st.session_state["toc_text_editable"] = st.session_state["toc_text_editable_pending"]
+        del st.session_state["toc_text_editable_pending"]
 
-    # Initialize widget state if needed
+    # Initialize widget state if first time
     if "toc_text_editable" not in st.session_state:
         st.session_state["toc_text_editable"] = toc_text
+    # ----------------------------------------------------------------------
 
-    # Render editable TOC area (binds to session_state)
+    # --- Show captured TOC ---
+    st.success(f"Detected language: **{detected.upper()}**")
     st.text_area("Captured TOC:", key="toc_text_editable", height=300)
 
     # --- Action buttons ---
@@ -206,7 +211,7 @@ if uploaded_file:
     with col2:
         refine_toc = st.button("🧠 Refine TOC with AI")
 
-    # --- AI refinement ---
+    # --- AI refinement (use PENDING to avoid Streamlit widget-key assignment error) ---
     if refine_toc and OPENAI_OK:
         lang_code = st.session_state.get("detected_lang", "en")
         chap_word = _chapter_word(lang_code if lang_code in ["it", "en", "es", "fr"] else "en")
@@ -216,7 +221,7 @@ if uploaded_file:
                 "You are a professional non-fiction editor.\n"
                 "Task: Clean up and balance the table of contents provided below.\n"
                 f"- Normalize main headings as '{chap_word} 1', '{chap_word} 2', ...\n"
-                "- Convert subsections to numeric scheme like 1.1, 1.2, 2.1, 2.2.\n"
+                "- Convert subsections to a numeric scheme like 1.1, 1.2, 2.1, 2.2.\n"
                 "- Ensure consistent casing and concise phrasing.\n"
                 "- Keep meaning but improve clarity.\n"
                 "- Output only the cleaned list, one heading per line.\n\n"
@@ -232,15 +237,16 @@ if uploaded_file:
                 max_tokens=800,
             )
             new_toc = (resp.choices[0].message.content or "").strip()
-            st.session_state["toc_text_editable"] = new_toc
-            st.info("AI proposal applied. You can still edit before confirming.")
+
+            # Save to PENDING, then rerun so we apply it BEFORE widget render
+            st.session_state["toc_text_editable_pending"] = new_toc
+            st.info("AI proposal applied. Reloading the editor...")
             st.rerun()
 
     # --- Final confirmation ---
     if confirm_toc:
         st.session_state.confirmed_toc_text = st.session_state.toc_text_editable
         st.success("✅ TOC confirmed. You can proceed to allocation.")
-
 # ==========================================
 # 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
 # ------------------------------------------
