@@ -140,7 +140,8 @@ for key, default in {
 st.subheader("📄 Step 1 — Upload your TOC")
 
 uploaded_file = st.file_uploader(
-    "Upload a file that contains the table of contents (DOCX or PDF)", type=["docx", "pdf"]
+    "Upload a file that contains the table of contents (DOCX or PDF)",
+    type=["docx", "pdf"]
 )
 
 def extract_toc_from_docx(file):
@@ -169,9 +170,7 @@ def extract_toc_from_pdf(file):
 # Localized chapter keyword to enforce in AI refinement
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
-    if lang_code not in mapping:
-        return "Chapter"
-    return mapping[lang_code]
+    return mapping.get(lang_code, "Chapter")
 
 if uploaded_file:
     # --- TOC extraction ---
@@ -192,7 +191,13 @@ if uploaded_file:
 
     # --- Show captured TOC ---
     st.success(f"Detected language: **{detected.upper()}**")
-    st.text_area("Captured TOC:", toc_text, height=300, key="toc_text_editable")
+
+    # Initialize widget state if needed
+    if "toc_text_editable" not in st.session_state:
+        st.session_state["toc_text_editable"] = toc_text
+
+    # Render editable TOC area (binds to session_state)
+    st.text_area("Captured TOC:", key="toc_text_editable", height=300)
 
     # --- Action buttons ---
     col1, col2 = st.columns([1, 1])
@@ -201,7 +206,7 @@ if uploaded_file:
     with col2:
         refine_toc = st.button("🧠 Refine TOC with AI")
 
-    # --- AI refinement with language-aware chapter naming and numbered subsections ---
+    # --- AI refinement ---
     if refine_toc and OPENAI_OK:
         lang_code = st.session_state.get("detected_lang", "en")
         chap_word = _chapter_word(lang_code if lang_code in ["it", "en", "es", "fr"] else "en")
@@ -210,12 +215,12 @@ if uploaded_file:
             prompt_refine = (
                 "You are a professional non-fiction editor.\n"
                 "Task: Clean up and balance the table of contents provided below.\n"
-                f"- Normalize main headings as '{chap_word} 1', '{chap_word} 2', ... without trailing punctuation.\n"
-                "- Convert subsections to a hierarchical numeric scheme like 1.1, 1.2, 2.1, 2.2.\n"
+                f"- Normalize main headings as '{chap_word} 1', '{chap_word} 2', ...\n"
+                "- Convert subsections to numeric scheme like 1.1, 1.2, 2.1, 2.2.\n"
                 "- Ensure consistent casing and concise phrasing.\n"
-                "- Keep the original meaning but improve clarity and structure.\n"
-                "- Output only the cleaned list, one heading per line, no extra commentary.\n\n"
-                f"Original TOC:\n{toc_text}"
+                "- Keep meaning but improve clarity.\n"
+                "- Output only the cleaned list, one heading per line.\n\n"
+                f"Original TOC:\n{st.session_state['toc_text_editable']}"
             )
             resp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -226,14 +231,16 @@ if uploaded_file:
                 temperature=0.4,
                 max_tokens=800,
             )
-            toc_text = (resp.choices[0].message.content or "").strip()
-            st.session_state.toc_text_editable = toc_text
+            new_toc = (resp.choices[0].message.content or "").strip()
+            st.session_state["toc_text_editable"] = new_toc
             st.info("AI proposal applied. You can still edit before confirming.")
+            st.rerun()
 
     # --- Final confirmation ---
     if confirm_toc:
         st.session_state.confirmed_toc_text = st.session_state.toc_text_editable
         st.success("✅ TOC confirmed. You can proceed to allocation.")
+
 # ==========================================
 # 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
 # ------------------------------------------
@@ -836,3 +843,4 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
             )
 else:
     st.info("Complete the previous steps to generate and download the book.")
+
