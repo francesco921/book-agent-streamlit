@@ -258,32 +258,24 @@ st.subheader("🧩 Step 2 — Book data & allocation")
 
 if st.session_state.confirmed_toc_text:
 
-    # ---------- helpers ----------
+    # --- helpers ---
 
     def _strip_leading_markers(s: str) -> str:
-        """
-        Remove any leading numbering/bullets:
-        - '-', '*', '•'
-        - '1.' / '1)' / '1 -' / '1.' with spaces
-        - '1.1', '1.1)', '1.1 -', '1.1.' (also '1.1.1'...)
-        - '.1' (edge case)
-        - extra spaces
-        """
+        """Remove leading '-', '*', '1.', '1)', '1.1 ' etc., and extra spaces."""
         s = s.strip()
-        # bullets
-        s = re.sub(r"^[\-\*\u2022]+\s*", "", s)
-        # numeric sequences like 1. , 1) , 1.1 , 1.1.1) , 2.3. , 3) :
-        s = re.sub(r"^\d+(?:\.\d+){0,3}[\.\)\-:]?\s*", "", s)
-        # leading '.1 '
-        s = re.sub(r"^\.\d+\s*", "", s)
+        s = re.sub(r"^[\-\*\u2022]+\s*", "", s)                 # bullets
+        s = re.sub(r"^\d+[\.\)]\s*", "", s)                    # 1.  / 1)
+        s = re.sub(r"^\d+\.\d+\s*", "", s)                     # 1.1
+        s = re.sub(r"^\.\d+\s*", "", s)                        # .1  (fix user issue)
         return s.strip()
 
     def parse_confirmed_toc(toc_text: str) -> List[Chapter]:
         """
+        Line-by-line TOC parser:
         - Plain line → Chapter
-        - Bullet/indent/numbered line → Section of current chapter
-        - Ensure every chapter has at least one section
-        - Normalize section numbering to '1.1', '1.2', ... (no double prefixes)
+        - Lines starting with '-', '*', '1.'/'1)', '1.1', or indented → Section of current chapter
+        - If a chapter has no sections, create 'Section 1'
+        - Normalize subsection numbering to 1.1, 1.2, ... per chapter
         """
         lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
         chapters: List[Chapter] = []
@@ -291,23 +283,33 @@ if st.session_state.confirmed_toc_text:
         chap_idx = 0
 
         def _is_section_line(ln: str) -> bool:
-            if ln.startswith(("-", "*")): return True
-            if re.match(r"^\s+\S", ln): return True                       # indentation
-            if re.match(r"^\d+[\.\)]\s+", ln): return True                # 1.  / 1)
-            if re.match(r"^\d+(?:\.\d+){1,3}[\.\)]?\s+", ln): return True # 1.1 / 1.1.1)
-            if re.match(r"^\.\d+\s+", ln): return True                    # .1
+            if ln.startswith(("-", "*")):
+                return True
+            if re.match(r"^\s+\S", ln):                         # indentation
+                return True
+            if re.match(r"^\d+[\.\)]\s+", ln):                  # 1.  or 1)
+                return True
+            if re.match(r"^\d+\.\d+\s+", ln):                   # 1.1
+                return True
+            if re.match(r"^\.\d+\s+", ln):                      # .1  (user case)
+                return True
             return False
 
         for raw in lines:
             ln = raw.strip()
+
+            # Heuristic: if obviously a section marker → section
             is_section = _is_section_line(ln)
 
+            # If not obviously a section and we have no current chapter, open a chapter
             if not is_section and current is None:
                 chap_idx += 1
                 current = Chapter(title=_strip_leading_markers(ln))
                 chapters.append(current)
                 continue
 
+            # If not obviously a section but we do have a current chapter,
+            # treat short, title-case lines as chapter starts; else fallback to section
             if not is_section:
                 looks_like_chapter = (
                     len(ln.split()) <= 12 and ln[:1].islower() is False and not re.search(r"[.:;\-]$", ln)
@@ -320,6 +322,7 @@ if st.session_state.confirmed_toc_text:
                 else:
                     is_section = True
 
+            # Section branch
             if current is None:
                 chap_idx += 1
                 current = Chapter(title=f"Chapter {chap_idx}")
@@ -328,18 +331,18 @@ if st.session_state.confirmed_toc_text:
             clean_title = _strip_leading_markers(ln)
             current.sections.append(Section(title=clean_title))
 
-        # ensure at least one section per chapter
+        # Ensure each chapter has at least one section
         for ch in chapters:
             if not ch.sections:
                 ch.sections.append(Section(title="Section 1"))
 
-        # Normalize numbering to 'ci.si Title' without duplicating existing prefixes
+        # Normalize subsection numbering per chapter: 1.1, 1.2, ...
         for ci, ch in enumerate(chapters, start=1):
             for si, sec in enumerate(ch.sections, start=1):
-                if re.match(rf"^{ci}\.{si}\s+", sec.title):
-                    continue  # already correct
-                base = re.sub(r"^\d+(?:\.\d+){1,3}[\.\)]?\s*", "", sec.title).strip()
-                sec.title = f"{ci}.{si} {base}"
+                # Prefix only if not already properly numbered
+                if not re.match(rf"^{ci}\.{si}\s+", sec.title):
+                    base = _strip_leading_markers(sec.title)
+                    sec.title = f"{ci}.{si} {base}"
         return chapters
 
     def allocate_words(chapters: List[Chapter], total_words: int, block_size_limit: int = 500) -> List[Chapter]:
@@ -366,7 +369,7 @@ if st.session_state.confirmed_toc_text:
             ch.blocks = ch_total_blocks
         return chapters
 
-    # ---------- UI (EN) ----------
+    # --- UI: language, tone, brief, formats, font ---
     lang_code = st.selectbox(
         "Generation language",
         ["auto", "it", "en", "es", "fr"],
@@ -442,6 +445,94 @@ if st.session_state.confirmed_toc_text:
     st.info("When satisfied, proceed to content generation.")
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
+# ----- SAFETY HELPERS: define if missing -----
+if 'generate_block_text' not in globals():
+    def _effective_language_label(plan: BookPlan) -> str:
+        code = plan.language_code
+        if code == "auto":
+            det = st.session_state.get("detected_lang", "en")
+            code = det if det in LANG_LABELS else "en"
+        return LANG_LABELS.get(code, "English")
+
+    def _tone_instruction(tone: str) -> str:
+        t = tone.lower()
+        if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
+        if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
+        return "Use a clear, friendly, practical tone."
+
+    def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
+        if not OPENAI_OK:
+            return " ".join(["[placeholder text]"] * 50)
+        try:
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": prompt_sys},
+                          {"role": "user", "content": prompt_user}],
+                temperature=0.7,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            return f"[generation error] {e}"
+
+    def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str,
+                            target_words: int, prev_summary: str = "",
+                            is_last_block: bool = False) -> str:
+        lang = _effective_language_label(plan)
+        tone_ins = _tone_instruction(plan.tone)
+        n_sub = max(1, math.ceil(target_words / MAX_SUBGEN_WORDS))
+        words_per_sub = min(math.ceil(target_words / n_sub), MAX_SUBGEN_WORDS)
+
+        sys = (
+            "You are an expert non-fiction writer. "
+            f"Write in {lang}. {tone_ins} Avoid repetition. "
+            "Do not restate the titles inside the text. Use continuous prose."
+        )
+        parts = []
+        for idx in range(n_sub):
+            role_note = "Start the section naturally." if idx == 0 else "Continue smoothly from the previous text."
+            if idx == n_sub - 1 and is_last_block:
+                role_note += " Conclude the section with a natural closing."
+            guidance = []
+            if plan.brief: guidance.append(f"Brief to follow: {plan.brief}")
+            if prev_summary: guidance.append(f"Previous context summary: {prev_summary}")
+            user = (
+                f"Book title: {plan.title}\nSubtitle: {plan.subtitle}\nAuthor: {plan.author}\n"
+                f"Chapter: {ch_title}\nSection: {sec_title}\n"
+                f"Goal words for this part: ~{words_per_sub} (hard limit per request: 500)\n{role_note}\n"
+                + ("\n".join(guidance) if guidance else "")
+            )
+            subtext = _generate_subchunk(sys, user)
+            parts.append(subtext.strip())
+        return " ".join(p for p in parts if p).strip()
+
+if 'generate_all_sections' not in globals():
+    def generate_all_sections(plan: BookPlan):
+        total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
+        done = 0
+        bar = st.progress(0, text="Writing in progress...")
+        prev_summary = ""
+        for ch in plan.chapters:
+            for sec in ch.sections:
+                sec.texts = []
+                block_target = max(1, math.ceil(sec.target_words / max(1, sec.blocks)))
+                for b in range(sec.blocks):
+                    is_last = (b == sec.blocks - 1)
+                    text = generate_block_text(
+                        plan=plan,
+                        ch_title=ch.title,
+                        sec_title=sec.title,
+                        target_words=block_target,
+                        prev_summary=prev_summary,
+                        is_last_block=is_last
+                    )
+                    sec.texts.append(text)
+                    words = re.split(r"\s+", text.strip())
+                    prev_summary = " ".join(words[:60]) + " ... " + " ".join(words[-40:]) if len(words) > 120 else text[:800]
+                    done += 1
+                    bar.progress(done / total_blocks, text=f"Blocks completed: {done}/{total_blocks}")
+        bar.empty()
+        st.success("✅ Content generation completed.")
+
 # ==========================================
 # ✍️ BLOCK 4 — GENERATION + DOCX/PDF EXPORT
 # ------------------------------------------
