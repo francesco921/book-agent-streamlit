@@ -432,6 +432,94 @@ if st.session_state.confirmed_toc_text:
     st.info("When satisfied, proceed to content generation.")
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
+# ----- SAFETY HELPERS: define if missing -----
+if 'generate_block_text' not in globals():
+    def _effective_language_label(plan: BookPlan) -> str:
+        code = plan.language_code
+        if code == "auto":
+            det = st.session_state.get("detected_lang", "en")
+            code = det if det in LANG_LABELS else "en"
+        return LANG_LABELS.get(code, "English")
+
+    def _tone_instruction(tone: str) -> str:
+        t = tone.lower()
+        if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
+        if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
+        return "Use a clear, friendly, practical tone."
+
+    def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
+        if not OPENAI_OK:
+            return " ".join(["[placeholder text]"] * 50)
+        try:
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": prompt_sys},
+                          {"role": "user", "content": prompt_user}],
+                temperature=0.7,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            return f"[generation error] {e}"
+
+    def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str,
+                            target_words: int, prev_summary: str = "",
+                            is_last_block: bool = False) -> str:
+        lang = _effective_language_label(plan)
+        tone_ins = _tone_instruction(plan.tone)
+        n_sub = max(1, math.ceil(target_words / MAX_SUBGEN_WORDS))
+        words_per_sub = min(math.ceil(target_words / n_sub), MAX_SUBGEN_WORDS)
+
+        sys = (
+            "You are an expert non-fiction writer. "
+            f"Write in {lang}. {tone_ins} Avoid repetition. "
+            "Do not restate the titles inside the text. Use continuous prose."
+        )
+        parts = []
+        for idx in range(n_sub):
+            role_note = "Start the section naturally." if idx == 0 else "Continue smoothly from the previous text."
+            if idx == n_sub - 1 and is_last_block:
+                role_note += " Conclude the section with a natural closing."
+            guidance = []
+            if plan.brief: guidance.append(f"Brief to follow: {plan.brief}")
+            if prev_summary: guidance.append(f"Previous context summary: {prev_summary}")
+            user = (
+                f"Book title: {plan.title}\nSubtitle: {plan.subtitle}\nAuthor: {plan.author}\n"
+                f"Chapter: {ch_title}\nSection: {sec_title}\n"
+                f"Goal words for this part: ~{words_per_sub} (hard limit per request: 500)\n{role_note}\n"
+                + ("\n".join(guidance) if guidance else "")
+            )
+            subtext = _generate_subchunk(sys, user)
+            parts.append(subtext.strip())
+        return " ".join(p for p in parts if p).strip()
+
+if 'generate_all_sections' not in globals():
+    def generate_all_sections(plan: BookPlan):
+        total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
+        done = 0
+        bar = st.progress(0, text="Writing in progress...")
+        prev_summary = ""
+        for ch in plan.chapters:
+            for sec in ch.sections:
+                sec.texts = []
+                block_target = max(1, math.ceil(sec.target_words / max(1, sec.blocks)))
+                for b in range(sec.blocks):
+                    is_last = (b == sec.blocks - 1)
+                    text = generate_block_text(
+                        plan=plan,
+                        ch_title=ch.title,
+                        sec_title=sec.title,
+                        target_words=block_target,
+                        prev_summary=prev_summary,
+                        is_last_block=is_last
+                    )
+                    sec.texts.append(text)
+                    words = re.split(r"\s+", text.strip())
+                    prev_summary = " ".join(words[:60]) + " ... " + " ".join(words[-40:]) if len(words) > 120 else text[:800]
+                    done += 1
+                    bar.progress(done / total_blocks, text=f"Blocks completed: {done}/{total_blocks}")
+        bar.empty()
+        st.success("✅ Content generation completed.")
+
 # ==========================================
 # ✍️ BLOCK 4 — GENERATION + DOCX/PDF EXPORT
 # ------------------------------------------
