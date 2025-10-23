@@ -297,7 +297,7 @@ with st.sidebar:
     title = st.text_input("Titolo")
     subtitle = st.text_input("Sottotitolo")
     author = st.text_input("Autore")
-    total_words = st.number_input("Totale parole", min_value=5000, step=500, value=20000)
+    total_words = st.number_input("Totale parole", min_value=500, step=500, value=20000)
     block_size = 500
     pdf_size = st.selectbox("Formato PDF", options=["A4", "Letter"], index=0)
     st.info(f"I blocchi sono sempre da {block_size} parole.")
