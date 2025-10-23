@@ -258,24 +258,32 @@ st.subheader("🧩 Step 2 — Book data & allocation")
 
 if st.session_state.confirmed_toc_text:
 
-    # --- helpers ---
+    # ---------- helpers ----------
 
     def _strip_leading_markers(s: str) -> str:
-        """Remove leading '-', '*', '1.', '1)', '1.1 ' etc., and extra spaces."""
+        """
+        Remove any leading numbering/bullets:
+        - '-', '*', '•'
+        - '1.' / '1)' / '1 -' / '1.' with spaces
+        - '1.1', '1.1)', '1.1 -', '1.1.' (also '1.1.1'...)
+        - '.1' (edge case)
+        - extra spaces
+        """
         s = s.strip()
-        s = re.sub(r"^[\-\*\u2022]+\s*", "", s)                 # bullets
-        s = re.sub(r"^\d+[\.\)]\s*", "", s)                    # 1.  / 1)
-        s = re.sub(r"^\d+\.\d+\s*", "", s)                     # 1.1
-        s = re.sub(r"^\.\d+\s*", "", s)                        # .1  (fix user issue)
+        # bullets
+        s = re.sub(r"^[\-\*\u2022]+\s*", "", s)
+        # numeric sequences like 1. , 1) , 1.1 , 1.1.1) , 2.3. , 3) :
+        s = re.sub(r"^\d+(?:\.\d+){0,3}[\.\)\-:]?\s*", "", s)
+        # leading '.1 '
+        s = re.sub(r"^\.\d+\s*", "", s)
         return s.strip()
 
     def parse_confirmed_toc(toc_text: str) -> List[Chapter]:
         """
-        Line-by-line TOC parser:
         - Plain line → Chapter
-        - Lines starting with '-', '*', '1.'/'1)', '1.1', or indented → Section of current chapter
-        - If a chapter has no sections, create 'Section 1'
-        - Normalize subsection numbering to 1.1, 1.2, ... per chapter
+        - Bullet/indent/numbered line → Section of current chapter
+        - Ensure every chapter has at least one section
+        - Normalize section numbering to '1.1', '1.2', ... (no double prefixes)
         """
         lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
         chapters: List[Chapter] = []
@@ -283,33 +291,23 @@ if st.session_state.confirmed_toc_text:
         chap_idx = 0
 
         def _is_section_line(ln: str) -> bool:
-            if ln.startswith(("-", "*")):
-                return True
-            if re.match(r"^\s+\S", ln):                         # indentation
-                return True
-            if re.match(r"^\d+[\.\)]\s+", ln):                  # 1.  or 1)
-                return True
-            if re.match(r"^\d+\.\d+\s+", ln):                   # 1.1
-                return True
-            if re.match(r"^\.\d+\s+", ln):                      # .1  (user case)
-                return True
+            if ln.startswith(("-", "*")): return True
+            if re.match(r"^\s+\S", ln): return True                       # indentation
+            if re.match(r"^\d+[\.\)]\s+", ln): return True                # 1.  / 1)
+            if re.match(r"^\d+(?:\.\d+){1,3}[\.\)]?\s+", ln): return True # 1.1 / 1.1.1)
+            if re.match(r"^\.\d+\s+", ln): return True                    # .1
             return False
 
         for raw in lines:
             ln = raw.strip()
-
-            # Heuristic: if obviously a section marker → section
             is_section = _is_section_line(ln)
 
-            # If not obviously a section and we have no current chapter, open a chapter
             if not is_section and current is None:
                 chap_idx += 1
                 current = Chapter(title=_strip_leading_markers(ln))
                 chapters.append(current)
                 continue
 
-            # If not obviously a section but we do have a current chapter,
-            # treat short, title-case lines as chapter starts; else fallback to section
             if not is_section:
                 looks_like_chapter = (
                     len(ln.split()) <= 12 and ln[:1].islower() is False and not re.search(r"[.:;\-]$", ln)
@@ -322,7 +320,6 @@ if st.session_state.confirmed_toc_text:
                 else:
                     is_section = True
 
-            # Section branch
             if current is None:
                 chap_idx += 1
                 current = Chapter(title=f"Chapter {chap_idx}")
@@ -331,18 +328,18 @@ if st.session_state.confirmed_toc_text:
             clean_title = _strip_leading_markers(ln)
             current.sections.append(Section(title=clean_title))
 
-        # Ensure each chapter has at least one section
+        # ensure at least one section per chapter
         for ch in chapters:
             if not ch.sections:
                 ch.sections.append(Section(title="Section 1"))
 
-        # Normalize subsection numbering per chapter: 1.1, 1.2, ...
+        # Normalize numbering to 'ci.si Title' without duplicating existing prefixes
         for ci, ch in enumerate(chapters, start=1):
             for si, sec in enumerate(ch.sections, start=1):
-                # Prefix only if not already properly numbered
-                if not re.match(rf"^{ci}\.{si}\s+", sec.title):
-                    base = _strip_leading_markers(sec.title)
-                    sec.title = f"{ci}.{si} {base}"
+                if re.match(rf"^{ci}\.{si}\s+", sec.title):
+                    continue  # already correct
+                base = re.sub(r"^\d+(?:\.\d+){1,3}[\.\)]?\s*", "", sec.title).strip()
+                sec.title = f"{ci}.{si} {base}"
         return chapters
 
     def allocate_words(chapters: List[Chapter], total_words: int, block_size_limit: int = 500) -> List[Chapter]:
@@ -369,7 +366,7 @@ if st.session_state.confirmed_toc_text:
             ch.blocks = ch_total_blocks
         return chapters
 
-    # --- UI: language, tone, brief, formats, font ---
+    # ---------- UI (EN) ----------
     lang_code = st.selectbox(
         "Generation language",
         ["auto", "it", "en", "es", "fr"],
@@ -445,189 +442,101 @@ if st.session_state.confirmed_toc_text:
     st.info("When satisfied, proceed to content generation.")
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
-# ----- SAFETY HELPERS: define if missing -----
-if 'generate_block_text' not in globals():
-    def _effective_language_label(plan: BookPlan) -> str:
-        code = plan.language_code
-        if code == "auto":
-            det = st.session_state.get("detected_lang", "en")
-            code = det if det in LANG_LABELS else "en"
-        return LANG_LABELS.get(code, "English")
-
-    def _tone_instruction(tone: str) -> str:
-        t = tone.lower()
-        if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
-        if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
-        return "Use a clear, friendly, practical tone."
-
-    def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
-        if not OPENAI_OK:
-            return " ".join(["[placeholder text]"] * 50)
-        try:
-            resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "system", "content": prompt_sys},
-                          {"role": "user", "content": prompt_user}],
-                temperature=0.7,
-            )
-            return (resp.choices[0].message.content or "").strip()
-        except Exception as e:
-            return f"[generation error] {e}"
-
-    def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str,
-                            target_words: int, prev_summary: str = "",
-                            is_last_block: bool = False) -> str:
-        lang = _effective_language_label(plan)
-        tone_ins = _tone_instruction(plan.tone)
-        n_sub = max(1, math.ceil(target_words / MAX_SUBGEN_WORDS))
-        words_per_sub = min(math.ceil(target_words / n_sub), MAX_SUBGEN_WORDS)
-
-        sys = (
-            "You are an expert non-fiction writer. "
-            f"Write in {lang}. {tone_ins} Avoid repetition. "
-            "Do not restate the titles inside the text. Use continuous prose."
-        )
-        parts = []
-        for idx in range(n_sub):
-            role_note = "Start the section naturally." if idx == 0 else "Continue smoothly from the previous text."
-            if idx == n_sub - 1 and is_last_block:
-                role_note += " Conclude the section with a natural closing."
-            guidance = []
-            if plan.brief: guidance.append(f"Brief to follow: {plan.brief}")
-            if prev_summary: guidance.append(f"Previous context summary: {prev_summary}")
-            user = (
-                f"Book title: {plan.title}\nSubtitle: {plan.subtitle}\nAuthor: {plan.author}\n"
-                f"Chapter: {ch_title}\nSection: {sec_title}\n"
-                f"Goal words for this part: ~{words_per_sub} (hard limit per request: 500)\n{role_note}\n"
-                + ("\n".join(guidance) if guidance else "")
-            )
-            subtext = _generate_subchunk(sys, user)
-            parts.append(subtext.strip())
-        return " ".join(p for p in parts if p).strip()
-
-if 'generate_all_sections' not in globals():
-    def generate_all_sections(plan: BookPlan):
-        total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
-        done = 0
-        bar = st.progress(0, text="Writing in progress...")
-        prev_summary = ""
-        for ch in plan.chapters:
-            for sec in ch.sections:
-                sec.texts = []
-                block_target = max(1, math.ceil(sec.target_words / max(1, sec.blocks)))
-                for b in range(sec.blocks):
-                    is_last = (b == sec.blocks - 1)
-                    text = generate_block_text(
-                        plan=plan,
-                        ch_title=ch.title,
-                        sec_title=sec.title,
-                        target_words=block_target,
-                        prev_summary=prev_summary,
-                        is_last_block=is_last
-                    )
-                    sec.texts.append(text)
-                    words = re.split(r"\s+", text.strip())
-                    prev_summary = " ".join(words[:60]) + " ... " + " ".join(words[-40:]) if len(words) > 120 else text[:800]
-                    done += 1
-                    bar.progress(done / total_blocks, text=f"Blocks completed: {done}/{total_blocks}")
-        bar.empty()
-        st.success("✅ Content generation completed.")
 
 # ==========================================
-# ✍️ BLOCK 4 — GENERATION + DOCX/PDF EXPORT
+# ✍️ BLOCK 4 — CONTENT GENERATION & EXPORT
 # ------------------------------------------
-# Generate content (≤500 words per API call), show preview,
-# and export DOCX/PDF with proper formatting, ToC, and options.
+# Generate content (≤500 words/request), preview snippets,
+# and export DOCX/PDF with proper styles, ToC, and options.
 # ==========================================
 
 st.subheader("🖋️ Step 3 — Content generation & export")
 
-# ---------- helpers already defined above are reused ----------
-# _effective_language_label(), _tone_instruction(), _count_words(),
-# _generate_subchunk(), generate_block_text(), generate_all_sections()
-
-# Extra imports needed for this block
-from docx.shared import Cm  # margins
+# ---------- extra imports for this block ----------
+from docx.shared import Cm
 from docx.oxml.ns import qn
-from docx.enum.section import WD_SECTION_START
 from reportlab.platypus.tableofcontents import TableOfContents
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 
-# Safe filename helper: Title_Subtitle
+# ---------- helpers ----------
+
+# Map app font name → ReportLab base font
+PDF_FONT_MAP = {
+    "Times New Roman": "Times-Roman",
+    "Roboto": "Helvetica",
+    "Comfortaa": "Courier",
+}
+
 def _safe_filename(plan: BookPlan) -> str:
-    base = f"{plan.title.strip()}_{plan.subtitle.strip()}" if plan.subtitle.strip() else plan.title.strip()
+    """Return Title_Subtitle safe filename (underscored, no specials)."""
+    base = f"{plan.title.strip()}_{plan.subtitle.strip()}" if (plan.subtitle and plan.subtitle.strip()) else plan.title.strip()
     base = re.sub(r"[^\w\-]+", "_", base).strip("_")
     base = re.sub(r"_+", "_", base)
     return base or "book"
 
 def _add_docx_toc(doc):
-    """
-    Insert a Word ToC field. Word will update fields at open (or via F9).
-    """
-    # Place a heading for TOC
+    """Insert a Word ToC field (Word will populate numbers on open / F9)."""
     p = doc.add_paragraph()
     run = p.add_run("Table of Contents")
     run.bold = True
     run.font.size = Pt(16)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Field code: TOC \o "1-3" \h \z \u
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
     p = doc.add_paragraph()
-    fld = OxmlElement('w:fldSimple')
-    fld.set(_qn('w:instr'), r'TOC \o "1-3" \h \z \u')
+    fld = OxmlElement("w:fldSimple")
+    fld.set(_qn("w:instr"), r'TOC \o "1-3" \h \z \u')
     p._p.append(fld)
 
-def build_docx(plan: BookPlan, include_toc: bool = False, include_copyright: bool = False) -> bytes:
+def build_docx(plan: BookPlan, include_toc: bool = True, include_copyright: bool = False) -> bytes:
     """
     DOCX:
-      - Title page: centered title/subtitle; author centered lower on page.
+      - Title page: centered title/subtitle; author centered lower.
       - Optional: Copyright/Disclaimer page.
-      - Optional: Table of Contents (Word updates page numbers at open).
-      - Body: headings left; normal text JUSTIFY.
-      - Page size: 6x9 or 8.5x11; margins 2.54 cm if 8.5x11.
-      - Font: set Normal style to chosen font.
+      - Optional: ToC (Word updates page numbers on open).
+      - Body: Heading 1 for chapters, Heading 2 for sections (so ToC works).
+      - Page size: 6x9 or 8.5x11; margins 2.54 cm when 8.5x11.
+      - Normal style font = selected font.
     """
     doc = Document()
 
-    # --- page setup (first section) ---
+    # Page setup
     sec = doc.sections[0]
     if plan.pdf_page == "6x9":
         sec.page_width, sec.page_height = Inches(6), Inches(9)
-    else:  # "8.5x11"
+        # (margins default — puoi aumentarle se vuoi)
+    else:  # 8.5x11
         sec.page_width, sec.page_height = Inches(8.5), Inches(11)
         sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = Cm(2.54)
 
-    # --- Title page (centered) ---
-    # Title
+    # Title page (centered)
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run(plan.title)
-    run.bold = True
-    run.font.size = Pt(26)
+    r = p.add_run(plan.title)
+    r.bold = True
+    r.font.size = Pt(26)
 
-    # Subtitle
     if plan.subtitle.strip():
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = p.add_run(plan.subtitle)
-        run.bold = False
-        run.font.size = Pt(16)
+        r = p.add_run(plan.subtitle)
+        r.bold = False
+        r.font.size = Pt(16)
 
-    # Push author lower on the page
+    # push author lower
     for _ in range(12):
         doc.add_paragraph("")
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run(plan.author)
-    run.bold = False
-    run.font.size = Pt(12)
+    r = p.add_run(plan.author)
+    r.bold = False
+    r.font.size = Pt(12)
 
     doc.add_page_break()
 
-    # --- Optional: Copyright/Disclaimer page ---
+    # Optional: Copyright/Disclaimer
     if include_copyright:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -646,82 +555,64 @@ def build_docx(plan: BookPlan, include_toc: bool = False, include_copyright: boo
         )
         para = doc.add_paragraph(copy_txt)
         para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-
         doc.add_page_break()
 
-    # --- Optional: Table of Contents (field) ---
+    # Optional: ToC (field)
     if include_toc:
         _add_docx_toc(doc)
         doc.add_page_break()
 
-    # --- Normal style & font ---
+    # Normal style & font
     style = doc.styles["Normal"]
     style.font.name = plan.font_name
     try:
-        style._element.rPr.rFonts.set(qn('w:eastAsia'), plan.font_name)  # type: ignore
+        style._element.rPr.rFonts.set(qn("w:eastAsia"), plan.font_name)  # type: ignore
     except Exception:
         pass
 
-    # --- Body content ---
-    def _docx_heading(text, size_pt, bold=True):
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        r = p.add_run(text)
-        r.bold = bold
-        r.font.size = Pt(size_pt)
+    # Body content — use real Heading 1/2 so ToC picks them up
+    def _heading(text: str, level: int):
+        p = doc.add_paragraph(text)
+        p.style = doc.styles["Heading 1" if level == 1 else "Heading 2"]
 
     for ch in plan.chapters:
-        _docx_heading(ch.title, 18, bold=True)
+        _heading(ch.title, level=1)
         for sec_obj in ch.sections:
-            _docx_heading(sec_obj.title, 14, bold=False)
+            _heading(sec_obj.title, level=2)
             for text in sec_obj.texts:
                 para = doc.add_paragraph(text)
                 para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
 
-    # ensure Normal paragraphs justify (safety)
-    for paragraph in doc.paragraphs:
-        if paragraph.style.name == "Normal":
-            paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
-# PDF font mapping
-PDF_FONT_MAP = {
-    "Times New Roman": "Times-Roman",
-    "Roboto": "Helvetica",
-    "Comfortaa": "Courier"
-}
-
-# Custom DocTemplate to collect headings for ToC
+# PDF with TableOfContents (ReportLab)
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-class _TocDocTemplate(SimpleDocTemplate):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.heading_entries = []
 
+class _TocDocTemplate(SimpleDocTemplate):
     def afterFlowable(self, flowable):
         if isinstance(flowable, Paragraph):
-            style_name = getattr(flowable.style, "name", "")
-            if style_name in ("H1", "H2"):
-                level = 0 if style_name == "H1" else 1
+            name = getattr(flowable.style, "name", "")
+            if name in ("H1", "H2"):
+                level = 0 if name == "H1" else 1
                 text = flowable.getPlainText()
                 page = self.canv.getPageNumber()
-                self.notify('TOCEntry', (level, text, page))
+                self.notify("TOCEntry", (level, text, page))
 
-def build_pdf(plan: BookPlan, include_toc: bool = False, include_copyright: bool = False) -> bytes:
+def build_pdf(plan: BookPlan, include_toc: bool = True, include_copyright: bool = False) -> bytes:
     """
     PDF:
       - Page size: 6x9 or 8.5x11
-      - Margins: 2.54 cm if 8.5x11, else 2 cm
+      - Margins: 2.54 cm if 8.5x11, else 2 cm default
       - Title page centered; author lower
-      - Optional: Copyright/Disclaimer page
-      - Optional: Table of Contents with page numbers (Platypus ToC)
+      - Optional: Copyright/Disclaimer
+      - Optional: Table of Contents with page numbers
     """
     pagesize = PAGE_SIZES.get(plan.pdf_page, PAGE_SIZES["6x9"])
     buf = io.BytesIO()
+
     if plan.pdf_page == "8.5x11":
         lm = rm = tm = bm = 2.54 * cm
     else:
@@ -731,7 +622,7 @@ def build_pdf(plan: BookPlan, include_toc: bool = False, include_copyright: bool
     styles = getSampleStyleSheet()
     base_font = PDF_FONT_MAP.get(plan.font_name, "Times-Roman")
 
-    # Styles
+    # styles
     H1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName=base_font, alignment=TA_LEFT, spaceBefore=12, spaceAfter=6)
     H2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName=base_font, alignment=TA_LEFT, spaceBefore=6, spaceAfter=4)
     Body = ParagraphStyle("Body", parent=styles["BodyText"], fontName=base_font, alignment=TA_JUSTIFY, leading=14)
@@ -752,7 +643,8 @@ def build_pdf(plan: BookPlan, include_toc: bool = False, include_copyright: bool
 
     # Optional: Copyright/Disclaimer
     if include_copyright:
-        story.append(Paragraph("Copyright & Disclaimer", ParagraphStyle("CPH", parent=styles["Heading2"], fontName=base_font, alignment=TA_CENTER)))
+        story.append(Paragraph("Copyright & Disclaimer",
+                               ParagraphStyle("CPH", parent=styles["Heading2"], fontName=base_font, alignment=TA_CENTER)))
         story.append(Spacer(1, 12))
         copy_txt = (
             f"© {plan.author}. All rights reserved.<br/><br/>"
@@ -765,14 +657,15 @@ def build_pdf(plan: BookPlan, include_toc: bool = False, include_copyright: bool
         story.append(Paragraph(copy_txt, Body))
         story.append(PageBreak())
 
-    # Optional: Table of Contents (ReportLab ToC)
+    # Optional: Table of Contents
     if include_toc:
         toc = TableOfContents()
         toc.levelStyles = [
-            ParagraphStyle(fontName=base_font, name='TOCHeading1', leftIndent=20, firstLineIndent=-10, spaceBefore=6, leading=12),
-            ParagraphStyle(fontName=base_font, name='TOCHeading2', leftIndent=36, firstLineIndent=-10, spaceBefore=4, leading=12),
+            ParagraphStyle(fontName=base_font, name="TOCHeading1", leftIndent=20, firstLineIndent=-10, spaceBefore=6, leading=12),
+            ParagraphStyle(fontName=base_font, name="TOCHeading2", leftIndent=36, firstLineIndent=-10, spaceBefore=4, leading=12),
         ]
-        story.append(Paragraph("Table of Contents", ParagraphStyle("TOCTitle", parent=styles["Heading1"], fontName=base_font, alignment=TA_CENTER)))
+        story.append(Paragraph("Table of Contents",
+                               ParagraphStyle("TOCTitle", parent=styles["Heading1"], fontName=base_font, alignment=TA_CENTER)))
         story.append(Spacer(1, 12))
         story.append(toc)
         story.append(PageBreak())
@@ -794,7 +687,6 @@ def build_pdf(plan: BookPlan, include_toc: bool = False, include_copyright: bool
 if st.session_state.allocation_done and st.session_state.generated_plan:
     plan: BookPlan = st.session_state.generated_plan
 
-    # Options
     c1, c2 = st.columns(2)
     with c1:
         opt_toc = st.checkbox("Include Table of Contents with page numbers", value=True)
@@ -809,7 +701,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
         except Exception as e:
             st.error(f"Export error: {e}")
 
-    # Preview (snippets)
+    # Preview
     if any(sec.texts for ch in plan.chapters for sec in ch.sections):
         st.subheader("👁️ Preview (snippets)")
         max_preview = 3
@@ -837,7 +729,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
                 data=st.session_state["docx_bytes"],
                 file_name=f"{fname}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
+                use_container_width=True,
             )
         with c2:
             st.download_button(
@@ -845,8 +737,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
                 data=st.session_state["pdf_bytes"],
                 file_name=f"{fname}.pdf",
                 mime="application/pdf",
-                use_container_width=True
+                use_container_width=True,
             )
 else:
     st.info("Complete the previous steps to generate and download the book.")
-
