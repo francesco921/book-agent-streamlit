@@ -1,12 +1,17 @@
 # ==========================================
-# 📘 Book Agent — Book Generator (Script corretto)
-# Fix principali:
-# - TOC DOCX affidabile (campo complesso, aggiornamento automatico, puntini + numero a destra)
-# - Margini DOCX = PDF (senza usare Cm; solo Inches/pt)
-# - TOC PDF popolato (multiBuild) con puntini e numero pagina allineato a destra
-# - Heading 1/2 corretti per aggancio TOC
+# 🧠 COSA FA (spiegato semplice)
+# ------------------------------------------
+# Questo programma crea un libro a partire dal tuo TOC:
+# - carichi il TOC
+# - controlli/correggi il TOC (anche con AI)
+# - confermi
+# - genera i testi (in blocchi da max 500 parole a chiamata)
+# - scarichi DOCX/PDF con formattazione.
 # ==========================================
 
+# ==========================================
+# 📦 IMPORT: prendo gli attrezzi che servono
+# ==========================================
 import io
 import os
 import re
@@ -16,7 +21,7 @@ from typing import List, Optional
 
 import streamlit as st
 from docx import Document
-from docx.shared import Pt, Inches  # ← niente Cm
+from docx.shared import Pt, Inches, Cm   # <-- Cm per i margini DOCX
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from PyPDF2 import PdfReader
@@ -26,7 +31,7 @@ from reportlab.lib.pagesizes import A4, letter  # (non usati in UI, ma safe to k
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.platypus.tableofcontents import TableOfContents
-# from reportlab.lib.units import cm  # ← non usato
+from reportlab.lib.units import cm              # <-- cm per i margini PDF
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 
 # Rilevazione lingua (se presente, altrimenti user selects)
@@ -126,8 +131,13 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
+
 # ==========================================
 # 📂 BLOCK 2 — TOC UPLOAD AND REVIEW
+# ------------------------------------------
+# User uploads TOC (DOCX or PDF), the app extracts headings,
+# detects language (or lets user choose), and allows manual
+# or AI refinement. Proceed only after final confirmation.
 # ==========================================
 
 st.subheader("📄 Step 1 — Upload your TOC")
@@ -138,6 +148,7 @@ uploaded_file = st.file_uploader(
 )
 
 def extract_toc_from_docx(file):
+    """Extract headings and subheadings from DOCX in a simple way."""
     doc = Document(file)
     toc_lines = []
     for p in doc.paragraphs:
@@ -147,6 +158,7 @@ def extract_toc_from_docx(file):
     return "\n".join(toc_lines)
 
 def extract_toc_from_pdf(file):
+    """Extract readable lines from the first pages of a PDF."""
     reader = PdfReader(file)
     lines = []
     for page in reader.pages[:3]:
@@ -158,19 +170,20 @@ def extract_toc_from_pdf(file):
                     lines.append(line)
     return "\n".join(lines)
 
-# Localized chapter keyword
-
+# Localized chapter keyword to enforce in AI refinement
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
 
 if uploaded_file:
+    # --- TOC extraction ---
     with st.spinner("Reading the TOC..."):
         if uploaded_file.name.endswith(".docx"):
             toc_text = extract_toc_from_docx(uploaded_file)
         else:
             toc_text = extract_toc_from_pdf(uploaded_file)
 
+    # --- Language detection ---
     detected = "auto"
     if HAS_LANGID:
         try:
@@ -179,25 +192,32 @@ if uploaded_file:
             detected = "auto"
     st.session_state.detected_lang = detected
 
+    # ---------- PENDING PATCH (MUST RUN BEFORE WIDGET RENDERING) ----------
     if "toc_text_editable_pending" in st.session_state:
         st.session_state["toc_text_editable"] = st.session_state["toc_text_editable_pending"]
         del st.session_state["toc_text_editable_pending"]
 
+    # Initialize widget state if first time
     if "toc_text_editable" not in st.session_state:
         st.session_state["toc_text_editable"] = toc_text
+    # ----------------------------------------------------------------------
 
+    # --- Show captured TOC ---
     st.success(f"Detected language: **{detected.upper()}**")
     st.text_area("Captured TOC:", key="toc_text_editable", height=300)
 
+    # --- Action buttons ---
     col1, col2 = st.columns([1, 1])
     with col1:
         confirm_toc = st.button("✅ Confirm this TOC")
     with col2:
         refine_toc = st.button("🧠 Refine TOC with AI")
 
+    # --- AI refinement (use PENDING to avoid widget-key assignment error) ---
     if refine_toc and OPENAI_OK:
         lang_code = st.session_state.get("detected_lang", "en")
         chap_word = _chapter_word(lang_code if lang_code in ["it", "en", "es", "fr"] else "en")
+
         with st.spinner("Generating an improved TOC..."):
             prompt_refine = (
                 "You are a professional non-fiction editor.\n"
@@ -219,32 +239,59 @@ if uploaded_file:
                 max_tokens=800,
             )
             new_toc = (resp.choices[0].message.content or "").strip()
+
+            # Salva in PENDING e rerun
             st.session_state["toc_text_editable_pending"] = new_toc
             st.info("AI proposal applied. Reloading the editor...")
             st.rerun()
 
+    # --- Final confirmation ---
     if confirm_toc:
         st.session_state.confirmed_toc_text = st.session_state.toc_text_editable
         st.success("✅ TOC confirmed. You can proceed to allocation.")
+
 else:
     st.info("Upload a TOC file to proceed.")
 
+
 # ==========================================
-# 🧩 Step 2 — Book data & allocation
+# 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
+# ------------------------------------------
+# Take the confirmed TOC, collect book metadata, validate
+# total words, and split into chapters/sections/blocks (≤500).
 # ==========================================
 
 st.subheader("🧩 Step 2 — Book data & allocation")
 
 if st.session_state.confirmed_toc_text:
 
+    # ---------- helpers ----------
+
     def _strip_leading_markers(s: str) -> str:
+        """
+        Remove any leading numbering/bullets:
+        - '-', '*', '•'
+        - '1.' / '1)' / '1 -' / '1.' with spaces
+        - '1.1', '1.1)', '1.1 -', '1.1.' (also '1.1.1'...)
+        - '.1' (edge case)
+        - extra spaces
+        """
         s = s.strip()
+        # bullets
         s = re.sub(r"^[\-\*\u2022]+\s*", "", s)
+        # numeric sequences like 1. , 1) , 1.1 , 1.1.1) , 2.3. , 3) :
         s = re.sub(r"^\d+(?:\.\d+){0,3}[\.\)\-:]?\s*", "", s)
+        # leading '.1 '
         s = re.sub(r"^\.\d+\s*", "", s)
         return s.strip()
 
     def parse_confirmed_toc(toc_text: str) -> List[Chapter]:
+        """
+        - Plain line → Chapter
+        - Bullet/indent/numbered line → Section of current chapter
+        - Ensure every chapter has at least one section
+        - Normalize section numbering to '1.1', '1.2', ... (no double prefixes)
+        """
         lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
         chapters: List[Chapter] = []
         current: Optional[Chapter] = None
@@ -252,10 +299,10 @@ if st.session_state.confirmed_toc_text:
 
         def _is_section_line(ln: str) -> bool:
             if ln.startswith(("-", "*")): return True
-            if re.match(r"^\s+\S", ln): return True
-            if re.match(r"^\d+[\.\)]\s+", ln): return True
-            if re.match(r"^\d+(?:\.\d+){1,3}[\.\)]?\s+", ln): return True
-            if re.match(r"^\.\d+\s+", ln): return True
+            if re.match(r"^\s+\S", ln): return True                       # indentation
+            if re.match(r"^\d+[\.\)]\s+", ln): return True                # 1.  / 1)
+            if re.match(r"^\d+(?:\.\d+){1,3}[\.\)]?\s+", ln): return True # 1.1 / 1.1.1)
+            if re.match(r"^\.\d+\s+", ln): return True                    # .1
             return False
 
         for raw in lines:
@@ -288,19 +335,27 @@ if st.session_state.confirmed_toc_text:
             clean_title = _strip_leading_markers(ln)
             current.sections.append(Section(title=clean_title))
 
+        # ensure at least one section per chapter
         for ch in chapters:
             if not ch.sections:
                 ch.sections.append(Section(title="Section 1"))
 
+        # Normalize numbering to 'ci.si Title' without duplicating existing prefixes
         for ci, ch in enumerate(chapters, start=1):
             for si, sec in enumerate(ch.sections, start=1):
                 if re.match(rf"^{ci}\.{si}\s+", sec.title):
-                    continue
+                    continue  # already correct
                 base = re.sub(r"^\d+(?:\.\d+){1,3}[\.\)]?\s*", "", sec.title).strip()
                 sec.title = f"{ci}.{si} {base}"
         return chapters
 
     def allocate_words(chapters: List[Chapter], total_words: int, block_size_limit: int = 500) -> List[Chapter]:
+        """
+        Even split:
+        - distribute words across chapters
+        - then across sections
+        - blocks = ceil(words_per_section / 500), at least 1
+        """
         n_ch = max(len(chapters), 1)
         base = total_words // n_ch
         rem = total_words % n_ch
@@ -318,6 +373,7 @@ if st.session_state.confirmed_toc_text:
             ch.blocks = ch_total_blocks
         return chapters
 
+    # ---------- UI (EN) ----------
     lang_code = st.selectbox(
         "Generation language",
         ["auto", "it", "en", "es", "fr"],
@@ -335,9 +391,12 @@ if st.session_state.confirmed_toc_text:
         placeholder="Example: beginner audience, practical style, real examples, avoid heavy jargon..."
     )
 
+    # LIMIT FORMATS to only 6x9 and 8.5x11
     pdf_page = st.selectbox("Page size", ["6x9", "8.5x11"], index=0)
+
     font_name = st.selectbox("Primary font", FONT_CHOICES, index=0)
 
+    # --- Book metadata form ---
     with st.form("book_info_form"):
         title = st.text_input("Book title")
         subtitle = st.text_input("Subtitle")
@@ -348,9 +407,10 @@ if st.session_state.confirmed_toc_text:
     if submitted_meta:
         st.success("Book data saved.")
 
+    # --- Minimal validation: enough words for sections? ---
     temp_chapters = parse_confirmed_toc(st.session_state.confirmed_toc_text)
     total_sections = sum(len(ch.sections) for ch in temp_chapters)
-    min_needed = total_sections * MIN_SECTION_WORDS_USEFUL
+    min_needed = total_sections * MIN_SECTION_WORDS_USEFUL  # 250 words/section minimum
 
     if total_words < min_needed:
         st.error(
@@ -359,6 +419,7 @@ if st.session_state.confirmed_toc_text:
         )
         st.stop()
 
+    # --- Allocation and on-screen preview ---
     chapters_alloc = allocate_words(temp_chapters, total_words, block_size_limit=MAX_SUBGEN_WORDS)
 
     plan_preview = BookPlan(
@@ -389,14 +450,17 @@ if st.session_state.confirmed_toc_text:
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
 
+
 # ==========================================
 # ✍️ BLOCK 4 — CONTENT GENERATION & EXPORT
+# ------------------------------------------
+# Generate content (≤500 words/request), preview snippets,
+# and export DOCX/PDF with proper styles, ToC, and options.
 # ==========================================
 
 st.subheader("🖋️ Step 3 — Content generation & export")
 
 # ---------- GENERATION HELPERS ----------
-
 def _effective_language_label(plan: BookPlan) -> str:
     code = plan.language_code
     if code == "auto":
@@ -404,13 +468,11 @@ def _effective_language_label(plan: BookPlan) -> str:
         code = det if det in LANG_LABELS else "en"
     return LANG_LABELS.get(code, "English")
 
-
 def _tone_instruction(tone: str) -> str:
     t = (tone or "").lower()
     if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
     if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
     return "Use a clear, friendly, and practical tone."
-
 
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
     if not OPENAI_OK:
@@ -427,7 +489,6 @@ def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         return f"[generation error] {e}"
-
 
 def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_words: int,
                         prev_summary: str = "", is_last_block: bool = False) -> str:
@@ -457,7 +518,6 @@ def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_wo
         txt = _generate_subchunk(sys, user)
         parts.append(txt.strip())
     return " ".join(parts).strip()
-
 
 def generate_all_sections(plan: BookPlan):
     total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
@@ -489,14 +549,13 @@ def generate_all_sections(plan: BookPlan):
 # ---------- EXPORT HELPERS ----------
 PDF_FONT_MAP = {"Times New Roman": "Times-Roman", "Roboto": "Helvetica", "Comfortaa": "Courier"}
 
-
 def _safe_filename(plan: BookPlan) -> str:
     base = f"{plan.title.strip()}_{plan.subtitle.strip()}" if plan.subtitle.strip() else plan.title.strip()
     base = re.sub(r"[^\w\-]+", "_", base).strip("_")
     return re.sub(r"_+", "_", base) or "book"
 
-
 def _enable_update_fields_on_open(doc: Document) -> None:
+    """Forza Word ad aggiornare i campi (incluso TOC) all'apertura."""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
     settings = doc.settings._element
@@ -504,14 +563,16 @@ def _enable_update_fields_on_open(doc: Document) -> None:
     upd.set(_qn("w:val"), "true")
     settings.append(upd)
 
-
 def _add_docx_toc(doc: Document) -> None:
+    """Inserisce un campo TOC complesso per puntini + numero a destra."""
+    # Titolo TOC
     p_title = doc.add_paragraph()
     run = p_title.add_run("Table of Contents")
     run.bold = True
     run.font.size = Pt(16)
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+    # Campo TOC (begin → instr → separate → placeholder → end)
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
 
@@ -526,6 +587,7 @@ def _add_docx_toc(doc: Document) -> None:
     r_instr = OxmlElement("w:r")
     instr = OxmlElement("w:instrText")
     instr.set(_qn("xml:space"), "preserve")
+    # \o "1-2" = livelli Heading 1-2; \h hyperlink; \z nasconde i numeri nella web view; \u usa stili TOC (puntini + tab dx)
     instr.text = r'TOC \o "1-2" \h \z \u'
     r_instr.append(instr)
     p._p.append(r_instr)
@@ -548,24 +610,25 @@ def _add_docx_toc(doc: Document) -> None:
     r_end.append(fld_end)
     p._p.append(r_end)
 
-
 def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     doc = Document()
     _enable_update_fields_on_open(doc)
 
+    # Dimensioni pagina e margini (con Cm per chiarezza)
     sec = doc.sections[0]
     if plan.pdf_page == "8.5x11":
         sec.page_width, sec.page_height = Inches(8.5), Inches(11)
-        margin_in = Inches(1.0)       # 2.54 cm
+        margin = Cm(2.54)
     else:
         sec.page_width, sec.page_height = Inches(6), Inches(9)
-        margin_in = Inches(0.7874)    # 2.0 cm
+        margin = Cm(2.00)
 
-    sec.top_margin = margin_in
-    sec.bottom_margin = margin_in
-    sec.left_margin = margin_in
-    sec.right_margin = margin_in
+    sec.top_margin = margin
+    sec.bottom_margin = margin
+    sec.left_margin = margin
+    sec.right_margin = margin
 
+    # Title page
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run(plan.title); r.bold = True; r.font.size = Pt(26)
     if plan.subtitle.strip():
@@ -577,6 +640,7 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     r = p.add_run(plan.author); r.font.size = Pt(12)
     doc.add_page_break()
 
+    # Copyright/Disclaimer
     if include_copyright:
         p = doc.add_paragraph("Copyright & Disclaimer"); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.runs[0].bold = True
@@ -587,16 +651,20 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
             "permission of the publisher, except in the case of brief quotations embodied in critical reviews.\n\n"
             "Disclaimer: The information in this book is provided for educational purposes only and does not constitute "
             "professional advice. Always consult a qualified professional for your specific situation."
-        ); para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        )
+        para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
 
+    # ToC
     if include_toc:
         _add_docx_toc(doc); doc.add_page_break()
 
+    # Font base
     style = doc.styles["Normal"]; style.font.name = plan.font_name
     try: style._element.rPr.rFonts.set(qn("w:eastAsia"), plan.font_name)
     except Exception: pass
 
+    # Contenuti — Heading 1/2 reali (necessari per il ToC)
     for ch in plan.chapters:
         doc.add_heading(ch.title, level=1)
         for sec_obj in ch.sections:
@@ -618,29 +686,29 @@ class _TocDocTemplate(SimpleDocTemplate):
                 lvl = 0 if nm == "H1" else 1
                 self.notify("TOCEntry", (lvl, f.getPlainText(), self.canv.getPageNumber()))
 
-
 def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
-    # niente 'cm': margini in pt
-    # 1 inch = 72 pt; 2.54 cm = 72 pt; 2.0 cm = 56.692913 pt
-    from reportlab.lib import colors
+    from reportlab.lib import colors  # puntini neri nel TOC
     pagesize = PAGE_SIZES.get(plan.pdf_page, PAGE_SIZES["6x9"])
     buf = io.BytesIO()
 
+    # Margini in cm (coerenti al DOCX)
     if plan.pdf_page == "8.5x11":
-        margin_pts = 72.0
+        margin = 2.54 * cm
     else:
-        margin_pts = 56.692913
+        margin = 2.00 * cm
 
     doc = _TocDocTemplate(
         buf,
         pagesize=pagesize,
-        leftMargin=margin_pts,
-        rightMargin=margin_pts,
-        topMargin=margin_pts,
-        bottomMargin=margin_pts,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin
     )
 
-    styles = getSampleStyleSheet(); fnt = PDF_FONT_MAP.get(plan.font_name, "Times-Roman")
+    styles = getSampleStyleSheet()
+    fnt = PDF_FONT_MAP.get(plan.font_name, "Times-Roman")
+
     H1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName=fnt, alignment=TA_LEFT, spaceBefore=12, spaceAfter=6)
     H2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName=fnt, alignment=TA_LEFT, spaceBefore=6, spaceAfter=4)
     Body = ParagraphStyle("Body", parent=styles["BodyText"], fontName=fnt, alignment=TA_JUSTIFY, leading=14)
@@ -648,10 +716,13 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     SubC = ParagraphStyle("SubC", parent=styles["BodyText"], fontName=fnt, alignment=TA_CENTER, spaceAfter=24)
 
     story = []
+    # Title page
     story += [Spacer(1, 40), Paragraph(plan.title, TitleC)]
-    if plan.subtitle.strip(): story.append(Paragraph(plan.subtitle, SubC))
+    if plan.subtitle.strip():
+        story.append(Paragraph(plan.subtitle, SubC))
     story += [Spacer(1, pagesize[1] * 0.55), Paragraph(plan.author, SubC), PageBreak()]
 
+    # Copyright/Disclaimer
     if include_copyright:
         story += [
             Paragraph("Copyright & Disclaimer", H2),
@@ -661,21 +732,26 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
                 "including photocopying, recording, or other electronic or mechanical methods, without the prior written "
                 "permission of the publisher, except in the case of brief quotations embodied in critical reviews.<br/><br/>"
                 "Disclaimer: The information in this book is provided for educational purposes only and does not constitute "
-                "professional advice. Always consult a qualified professional for your specific situation.", Body,
+                "professional advice. Always consult a qualified professional for your specific situation.",
+                Body
             ),
-            PageBreak(),
+            PageBreak()
         ]
 
+    # TOC con puntini e numeri a destra
     if include_toc:
         toc = TableOfContents()
         toc.levelStyles = [
-            ParagraphStyle(name="TOC1", parent=styles["Normal"], fontName=fnt, leftIndent=20, firstLineIndent=-10, leading=12, spaceBefore=6),
-            ParagraphStyle(name="TOC2", parent=styles["Normal"], fontName=fnt, leftIndent=36, firstLineIndent=-10, leading=12, spaceBefore=4),
+            ParagraphStyle(name="TOC1", parent=styles["Normal"], fontName=fnt,
+                           leftIndent=20, firstLineIndent=-10, leading=12, spaceBefore=6),
+            ParagraphStyle(name="TOC2", parent=styles["Normal"], fontName=fnt,
+                           leftIndent=36, firstLineIndent=-10, leading=12, spaceBefore=4),
         ]
         toc.dotsMinLevel = 0
         toc.dotsColor = colors.black
         story += [Paragraph("TABLE OF CONTENTS", H1), Spacer(1, 12), toc, PageBreak()]
 
+    # Contenuti con stili H1/H2 che il TOC intercetta
     for ch in plan.chapters:
         story.append(Paragraph(ch.title, H1))
         for sec in ch.sections:
@@ -685,6 +761,7 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
                 story.append(Spacer(1, 8))
         story.append(PageBreak())
 
+    # Necessario per popolazione TOC: build a due passaggi
     doc.multiBuild(story)
     return buf.getvalue()
 
@@ -706,6 +783,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
         except Exception as e:
             st.error(f"Export error: {e}")
 
+    # Preview (snippets)
     if any(sec.texts for ch in plan.chapters for sec in ch.sections):
         st.subheader("👁️ Preview (snippets)")
         max_preview, shown = 3, 0
@@ -721,6 +799,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
             if shown >= max_preview:
                 break
 
+    # Downloads with Title_Subtitle filenames
     if st.session_state.get("docx_bytes") and st.session_state.get("pdf_bytes"):
         st.subheader("📥 Download your book")
         fname = _safe_filename(plan)
@@ -731,7 +810,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
                 data=st.session_state["docx_bytes"],
                 file_name=f"{fname}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
+                use_container_width=True
             )
         with c2:
             st.download_button(
@@ -739,7 +818,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
                 data=st.session_state["pdf_bytes"],
                 file_name=f"{fname}.pdf",
                 mime="application/pdf",
-                use_container_width=True,
+                use_container_width=True
             )
 else:
-    st.info("Complete the previous steps to generate and download the book.")
+    st.info("Please confirm the TOC in Step 1 first to generate and download the book.")

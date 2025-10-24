@@ -21,7 +21,7 @@ from typing import List, Optional
 
 import streamlit as st
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from PyPDF2 import PdfReader
