@@ -1,8 +1,17 @@
 # ==========================================
-# 📘 Book Agent — Book Generator (Full Script)
-# Fixed: TOC generation in DOCX, identical DOCX/PDF margins, proper Heading 1/2
+# 🧠 COSA FA (spiegato semplice)
+# ------------------------------------------
+# Questo programma crea un libro a partire dal tuo TOC:
+# - carichi il TOC
+# - controlli/correggi il TOC (anche con AI)
+# - confermi
+# - genera i testi (in blocchi da max 500 parole a chiamata)
+# - scarichi DOCX/PDF con formattazione.
 # ==========================================
 
+# ==========================================
+# 📦 IMPORT: prendo gli attrezzi che servono
+# ==========================================
 import io
 import os
 import re
@@ -12,7 +21,7 @@ from typing import List, Optional
 
 import streamlit as st
 from docx import Document
-from docx.shared import Pt, Inches, Cm
+from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from PyPDF2 import PdfReader
@@ -121,6 +130,7 @@ for key, default in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
 
 # ==========================================
 # 📂 BLOCK 2 — TOC UPLOAD AND REVIEW
@@ -243,6 +253,7 @@ if uploaded_file:
 
 else:
     st.info("Upload a TOC file to proceed.")
+
 
 # ==========================================
 # 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
@@ -440,6 +451,7 @@ if st.session_state.confirmed_toc_text:
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
 
+
 # ==========================================
 # ✍️ BLOCK 4 — CONTENT GENERATION & EXPORT
 # ------------------------------------------
@@ -458,13 +470,11 @@ def _effective_language_label(plan: BookPlan) -> str:
         code = det if det in LANG_LABELS else "en"
     return LANG_LABELS.get(code, "English")
 
-
 def _tone_instruction(tone: str) -> str:
     t = (tone or "").lower()
     if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
     if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
     return "Use a clear, friendly, and practical tone."
-
 
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
     if not OPENAI_OK:
@@ -481,7 +491,6 @@ def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         return f"[generation error] {e}"
-
 
 def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_words: int,
                         prev_summary: str = "", is_last_block: bool = False) -> str:
@@ -511,7 +520,6 @@ def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_wo
         txt = _generate_subchunk(sys, user)
         parts.append(txt.strip())
     return " ".join(parts).strip()
-
 
 def generate_all_sections(plan: BookPlan):
     total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
@@ -543,15 +551,12 @@ def generate_all_sections(plan: BookPlan):
 # ---------- EXPORT HELPERS ----------
 PDF_FONT_MAP = {"Times New Roman": "Times-Roman", "Roboto": "Helvetica", "Comfortaa": "Courier"}
 
-
 def _safe_filename(plan: BookPlan) -> str:
     base = f"{plan.title.strip()}_{plan.subtitle.strip()}" if plan.subtitle.strip() else plan.title.strip()
     base = re.sub(r"[^\w\-]+", "_", base).strip("_")
     return re.sub(r"_+", "_", base) or "book"
 
-
 def _enable_update_fields_on_open(doc: Document) -> None:
-    """Forza Word ad aggiornare i campi (incluso TOC) all'apertura."""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
     settings = doc.settings._element
@@ -559,29 +564,57 @@ def _enable_update_fields_on_open(doc: Document) -> None:
     upd.set(_qn("w:val"), "true")
     settings.append(upd)
 
-
 def _add_docx_toc(doc: Document) -> None:
     # Titolo TOC
-    p = doc.add_paragraph()
-    run = p.add_run("Table of Contents")
+    p_title = doc.add_paragraph()
+    run = p_title.add_run("Table of Contents")
     run.bold = True
     run.font.size = Pt(16)
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Campo TOC (Heading 1–2 con hyperlink)
+    # Campo TOC complesso: \o "1-2" \h \z \u
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
-    p = doc.add_paragraph()
-    fld = OxmlElement("w:fldSimple")
-    fld.set(_qn("w:instr"), r'TOC \o "1-2" \h \z \u')
-    p._p.append(fld)
 
+    p = doc.add_paragraph()
+
+    r_begin = OxmlElement("w:r")
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(_qn("w:fldCharType"), "begin")
+    r_begin.append(fld_begin)
+    p._p.append(r_begin)
+
+    r_instr = OxmlElement("w:r")
+    instr = OxmlElement("w:instrText")
+    instr.set(_qn("xml:space"), "preserve")
+    # \u usa gli stili di TOC di Word che includono tab a destra e puntinatura
+    instr.text = r'TOC \o "1-2" \h \z \u'
+    r_instr.append(instr)
+    p._p.append(r_instr)
+
+    r_sep = OxmlElement("w:r")
+    fld_sep = OxmlElement("w:fldChar")
+    fld_sep.set(_qn("w:fldCharType"), "separate")
+    r_sep.append(fld_sep)
+    p._p.append(r_sep)
+
+    r_txt = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "Table of contents will be generated on open."
+    r_txt.append(t)
+    p._p.append(r_txt)
+
+    r_end = OxmlElement("w:r")
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(_qn("w:fldCharType"), "end")
+    r_end.append(fld_end)
+    p._p.append(r_end)
 
 def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     doc = Document()
     _enable_update_fields_on_open(doc)
 
-    # Sezione e dimensioni pagina
+    # Sezione e dimensioni pagina + margini allineati al PDF
     sec = doc.sections[0]
     if plan.pdf_page == "8.5x11":
         sec.page_width, sec.page_height = Inches(8.5), Inches(11)
@@ -618,7 +651,8 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
             "permission of the publisher, except in the case of brief quotations embodied in critical reviews.\n\n"
             "Disclaimer: The information in this book is provided for educational purposes only and does not constitute "
             "professional advice. Always consult a qualified professional for your specific situation."
-        ); para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        )
+        para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
 
     # ToC
@@ -630,12 +664,12 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     try: style._element.rPr.rFonts.set(qn("w:eastAsia"), plan.font_name)
     except Exception: pass
 
-    # Content — Heading 1/2 reali (necessari per il ToC)
+    # Contenuti con Heading 1/2 reali
     for ch in plan.chapters:
         doc.add_heading(ch.title, level=1)
-        for sec in ch.sections:
-            doc.add_heading(sec.title, level=2)
-            for text in sec.texts:
+        for sec_obj in ch.sections:
+            doc.add_heading(sec_obj.title, level=2)
+            for text in sec_obj.texts:
                 para = doc.add_paragraph(text)
                 para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
@@ -645,19 +679,21 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
 # ---------- PDF BUILD ----------
 class _TocDocTemplate(SimpleDocTemplate):
     def afterFlowable(self, f):
+        from reportlab.platypus import Paragraph
         if isinstance(f, Paragraph):
             nm = getattr(f.style, "name", "")
             if nm in ("H1", "H2"):
                 lvl = 0 if nm == "H1" else 1
                 self.notify("TOCEntry", (lvl, f.getPlainText(), self.canv.getPageNumber()))
 
-
 def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
+    from reportlab.lib import colors
     pagesize = PAGE_SIZES.get(plan.pdf_page, PAGE_SIZES["6x9"])
     buf = io.BytesIO()
-    # Margini: 2.54 cm su 8.5x11, 2.0 cm su 6x9 (coerente con DOCX)
+    # Margini: 2.54 cm su 8.5x11, 2.0 cm su 6x9
     m = 2.54 * cm if plan.pdf_page == "8.5x11" else 2 * cm
     doc = _TocDocTemplate(buf, pagesize=pagesize, leftMargin=m, rightMargin=m, topMargin=m, bottomMargin=m)
+
     styles = getSampleStyleSheet(); fnt = PDF_FONT_MAP.get(plan.font_name, "Times-Roman")
     H1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName=fnt, alignment=TA_LEFT, spaceBefore=12, spaceAfter=6)
     H2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName=fnt, alignment=TA_LEFT, spaceBefore=6, spaceAfter=4)
@@ -686,16 +722,20 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
             PageBreak()
         ]
 
-    # ToC
+    # TOC con puntini e numeri a destra
     if include_toc:
         toc = TableOfContents()
         toc.levelStyles = [
-            ParagraphStyle(fontName=fnt, name="TOC1", leftIndent=20, firstLineIndent=-10, spaceBefore=6, leading=12),
-            ParagraphStyle(fontName=fnt, name="TOC2", leftIndent=36, firstLineIndent=-10, spaceBefore=4, leading=12),
+            ParagraphStyle(name="TOC1", parent=styles["Normal"], fontName=fnt,
+                           leftIndent=20, firstLineIndent=-10, leading=12, spaceBefore=6),
+            ParagraphStyle(name="TOC2", parent=styles["Normal"], fontName=fnt,
+                           leftIndent=36, firstLineIndent=-10, leading=12, spaceBefore=4),
         ]
-        story += [Paragraph("Table of Contents", H1), Spacer(1, 12), toc, PageBreak()]
+        toc.dotsMinLevel = 0
+        toc.dotsColor = colors.black
+        story += [Paragraph("TABLE OF CONTENTS", H1), Spacer(1, 12), toc, PageBreak()]
 
-    # Content
+    # Contenuti
     for ch in plan.chapters:
         story.append(Paragraph(ch.title, H1))
         for sec in ch.sections:
@@ -705,7 +745,9 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
                 story.append(Spacer(1, 8))
         story.append(PageBreak())
 
-    doc.build(story); return buf.getvalue()
+    # Build in due passaggi per popolare il TOC
+    doc.multiBuild(story)
+    return buf.getvalue()
 
 # ----- UI: generate + preview + downloads + options -----
 if st.session_state.allocation_done and st.session_state.generated_plan:
@@ -728,8 +770,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
     # Preview (snippets)
     if any(sec.texts for ch in plan.chapters for sec in ch.sections):
         st.subheader("👁️ Preview (snippets)")
-        max_preview = 3
-        shown = 0
+        max_preview, shown = 3, 0
         for i, ch in enumerate(plan.chapters, start=1):
             for j, sec in enumerate(ch.sections, start=1):
                 if sec.texts:
@@ -742,7 +783,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
             if shown >= max_preview:
                 break
 
-    # Downloads with Title_Subtitle filenames
+    # Downloads
     if st.session_state.get("docx_bytes") and st.session_state.get("pdf_bytes"):
         st.subheader("📥 Download your book")
         fname = _safe_filename(plan)
