@@ -21,7 +21,7 @@ from typing import List, Optional
 
 import streamlit as st
 from docx import Document
-from docx.shared import Pt, Inches, cm
+from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from PyPDF2 import PdfReader
@@ -462,7 +462,6 @@ else:
 st.subheader("🖋️ Step 3 — Content generation & export")
 
 # ---------- GENERATION HELPERS ----------
-
 def _effective_language_label(plan: BookPlan) -> str:
     code = plan.language_code
     if code == "auto":
@@ -556,77 +555,28 @@ def _safe_filename(plan: BookPlan) -> str:
     base = re.sub(r"[^\w\-]+", "_", base).strip("_")
     return re.sub(r"_+", "_", base) or "book"
 
-def _enable_update_fields_on_open(doc: Document) -> None:
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn as _qn
-    settings = doc.settings._element
-    upd = OxmlElement("w:updateFields")
-    upd.set(_qn("w:val"), "true")
-    settings.append(upd)
-
-def _add_docx_toc(doc: Document) -> None:
-    # Titolo TOC
-    p_title = doc.add_paragraph()
-    run = p_title.add_run("Table of Contents")
+def _add_docx_toc(doc):
+    p = doc.add_paragraph()
+    run = p.add_run("Table of Contents")
     run.bold = True
     run.font.size = Pt(16)
-    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    # Campo TOC complesso: \o "1-2" \h \z \u
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
-
     p = doc.add_paragraph()
-
-    r_begin = OxmlElement("w:r")
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(_qn("w:fldCharType"), "begin")
-    r_begin.append(fld_begin)
-    p._p.append(r_begin)
-
-    r_instr = OxmlElement("w:r")
-    instr = OxmlElement("w:instrText")
-    instr.set(_qn("xml:space"), "preserve")
-    # \u usa gli stili di TOC di Word che includono tab a destra e puntinatura
-    instr.text = r'TOC \o "1-2" \h \z \u'
-    r_instr.append(instr)
-    p._p.append(r_instr)
-
-    r_sep = OxmlElement("w:r")
-    fld_sep = OxmlElement("w:fldChar")
-    fld_sep.set(_qn("w:fldCharType"), "separate")
-    r_sep.append(fld_sep)
-    p._p.append(r_sep)
-
-    r_txt = OxmlElement("w:r")
-    t = OxmlElement("w:t")
-    t.text = "Table of contents will be generated on open."
-    r_txt.append(t)
-    p._p.append(r_txt)
-
-    r_end = OxmlElement("w:r")
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(_qn("w:fldCharType"), "end")
-    r_end.append(fld_end)
-    p._p.append(r_end)
+    fld = OxmlElement("w:fldSimple")
+    fld.set(_qn("w:instr"), r'TOC \o "1-3" \h \z \u')
+    p._p.append(fld)
 
 def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     doc = Document()
-    _enable_update_fields_on_open(doc)
-
-    # Sezione e dimensioni pagina + margini allineati al PDF
     sec = doc.sections[0]
     if plan.pdf_page == "8.5x11":
         sec.page_width, sec.page_height = Inches(8.5), Inches(11)
-        margin = Cm(2.54)
+        sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = cm_to_Cm = Cm(2.54)
+        sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = Cm(2.54)
     else:
         sec.page_width, sec.page_height = Inches(6), Inches(9)
-        margin = Cm(2.0)
-
-    sec.top_margin = margin
-    sec.bottom_margin = margin
-    sec.left_margin = margin
-    sec.right_margin = margin
 
     # Title page
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -634,8 +584,7 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     if plan.subtitle.strip():
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(plan.subtitle); r.font.size = Pt(16)
-    for _ in range(12):
-        doc.add_paragraph("")
+    for _ in range(12): doc.add_paragraph("")
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run(plan.author); r.font.size = Pt(12)
     doc.add_page_break()
@@ -651,8 +600,7 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
             "permission of the publisher, except in the case of brief quotations embodied in critical reviews.\n\n"
             "Disclaimer: The information in this book is provided for educational purposes only and does not constitute "
             "professional advice. Always consult a qualified professional for your specific situation."
-        )
-        para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        ); para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
 
     # ToC
@@ -664,12 +612,12 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     try: style._element.rPr.rFonts.set(qn("w:eastAsia"), plan.font_name)
     except Exception: pass
 
-    # Contenuti con Heading 1/2 reali
+    # Content — Heading 1/2 reali (necessari per il ToC)
     for ch in plan.chapters:
-        doc.add_heading(ch.title, level=1)
-        for sec_obj in ch.sections:
-            doc.add_heading(sec_obj.title, level=2)
-            for text in sec_obj.texts:
+        p = doc.add_paragraph(ch.title); p.style = doc.styles["Heading 1"]
+        for sec in ch.sections:
+            p = doc.add_paragraph(sec.title); p.style = doc.styles["Heading 2"]
+            for text in sec.texts:
                 para = doc.add_paragraph(text)
                 para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
@@ -679,7 +627,6 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
 # ---------- PDF BUILD ----------
 class _TocDocTemplate(SimpleDocTemplate):
     def afterFlowable(self, f):
-        from reportlab.platypus import Paragraph
         if isinstance(f, Paragraph):
             nm = getattr(f.style, "name", "")
             if nm in ("H1", "H2"):
@@ -687,13 +634,10 @@ class _TocDocTemplate(SimpleDocTemplate):
                 self.notify("TOCEntry", (lvl, f.getPlainText(), self.canv.getPageNumber()))
 
 def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
-    from reportlab.lib import colors
     pagesize = PAGE_SIZES.get(plan.pdf_page, PAGE_SIZES["6x9"])
     buf = io.BytesIO()
-    # Margini: 2.54 cm su 8.5x11, 2.0 cm su 6x9
     m = 2.54 * cm if plan.pdf_page == "8.5x11" else 2 * cm
     doc = _TocDocTemplate(buf, pagesize=pagesize, leftMargin=m, rightMargin=m, topMargin=m, bottomMargin=m)
-
     styles = getSampleStyleSheet(); fnt = PDF_FONT_MAP.get(plan.font_name, "Times-Roman")
     H1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName=fnt, alignment=TA_LEFT, spaceBefore=12, spaceAfter=6)
     H2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName=fnt, alignment=TA_LEFT, spaceBefore=6, spaceAfter=4)
@@ -722,20 +666,16 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
             PageBreak()
         ]
 
-    # TOC con puntini e numeri a destra
+    # ToC
     if include_toc:
         toc = TableOfContents()
         toc.levelStyles = [
-            ParagraphStyle(name="TOC1", parent=styles["Normal"], fontName=fnt,
-                           leftIndent=20, firstLineIndent=-10, leading=12, spaceBefore=6),
-            ParagraphStyle(name="TOC2", parent=styles["Normal"], fontName=fnt,
-                           leftIndent=36, firstLineIndent=-10, leading=12, spaceBefore=4),
+            ParagraphStyle(fontName=fnt, name="TOC1", leftIndent=20, firstLineIndent=-10, spaceBefore=6, leading=12),
+            ParagraphStyle(fontName=fnt, name="TOC2", leftIndent=36, firstLineIndent=-10, spaceBefore=4, leading=12),
         ]
-        toc.dotsMinLevel = 0
-        toc.dotsColor = colors.black
-        story += [Paragraph("TABLE OF CONTENTS", H1), Spacer(1, 12), toc, PageBreak()]
+        story += [Paragraph("Table of Contents", H1), Spacer(1, 12), toc, PageBreak()]
 
-    # Contenuti
+    # Content
     for ch in plan.chapters:
         story.append(Paragraph(ch.title, H1))
         for sec in ch.sections:
@@ -745,9 +685,7 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
                 story.append(Spacer(1, 8))
         story.append(PageBreak())
 
-    # Build in due passaggi per popolare il TOC
-    doc.multiBuild(story)
-    return buf.getvalue()
+    doc.build(story); return buf.getvalue()
 
 # ----- UI: generate + preview + downloads + options -----
 if st.session_state.allocation_done and st.session_state.generated_plan:
@@ -770,7 +708,8 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
     # Preview (snippets)
     if any(sec.texts for ch in plan.chapters for sec in ch.sections):
         st.subheader("👁️ Preview (snippets)")
-        max_preview, shown = 3, 0
+        max_preview = 3
+        shown = 0
         for i, ch in enumerate(plan.chapters, start=1):
             for j, sec in enumerate(ch.sections, start=1):
                 if sec.texts:
@@ -783,7 +722,7 @@ if st.session_state.allocation_done and st.session_state.generated_plan:
             if shown >= max_preview:
                 break
 
-    # Downloads
+    # Downloads with Title_Subtitle filenames
     if st.session_state.get("docx_bytes") and st.session_state.get("pdf_bytes"):
         st.subheader("📥 Download your book")
         fname = _safe_filename(plan)
