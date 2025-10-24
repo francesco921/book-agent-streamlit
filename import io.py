@@ -9,7 +9,7 @@ import streamlit as st
 
 # Word/docx
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # PDF
