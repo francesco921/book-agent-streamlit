@@ -1,17 +1,8 @@
 # ==========================================
-# 🧠 COSA FA (spiegato semplice)
-# ------------------------------------------
-# Questo programma crea un libro a partire dal tuo TOC:
-# - carichi il TOC
-# - controlli/correggi il TOC (anche con AI)
-# - confermi
-# - genera i testi (in blocchi da max 500 parole a chiamata)
-# - scarichi DOCX/PDF con formattazione.
+# 📘 Book Agent — Book Generator (Full Script)
+# Fixed: TOC generation in DOCX, identical DOCX/PDF margins, proper Heading 1/2
 # ==========================================
 
-# ==========================================
-# 📦 IMPORT: prendo gli attrezzi che servono
-# ==========================================
 import io
 import os
 import re
@@ -21,7 +12,7 @@ from typing import List, Optional
 
 import streamlit as st
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from PyPDF2 import PdfReader
@@ -130,7 +121,6 @@ for key, default in {
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
-
 
 # ==========================================
 # 📂 BLOCK 2 — TOC UPLOAD AND REVIEW
@@ -253,7 +243,6 @@ if uploaded_file:
 
 else:
     st.info("Upload a TOC file to proceed.")
-
 
 # ==========================================
 # 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
@@ -451,7 +440,6 @@ if st.session_state.confirmed_toc_text:
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
 
-
 # ==========================================
 # ✍️ BLOCK 4 — CONTENT GENERATION & EXPORT
 # ------------------------------------------
@@ -462,6 +450,7 @@ else:
 st.subheader("🖋️ Step 3 — Content generation & export")
 
 # ---------- GENERATION HELPERS ----------
+
 def _effective_language_label(plan: BookPlan) -> str:
     code = plan.language_code
     if code == "auto":
@@ -469,11 +458,13 @@ def _effective_language_label(plan: BookPlan) -> str:
         code = det if det in LANG_LABELS else "en"
     return LANG_LABELS.get(code, "English")
 
+
 def _tone_instruction(tone: str) -> str:
     t = (tone or "").lower()
     if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
     if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
     return "Use a clear, friendly, and practical tone."
+
 
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
     if not OPENAI_OK:
@@ -490,6 +481,7 @@ def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         return f"[generation error] {e}"
+
 
 def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_words: int,
                         prev_summary: str = "", is_last_block: bool = False) -> str:
@@ -519,6 +511,7 @@ def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_wo
         txt = _generate_subchunk(sys, user)
         parts.append(txt.strip())
     return " ".join(parts).strip()
+
 
 def generate_all_sections(plan: BookPlan):
     total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
@@ -550,33 +543,57 @@ def generate_all_sections(plan: BookPlan):
 # ---------- EXPORT HELPERS ----------
 PDF_FONT_MAP = {"Times New Roman": "Times-Roman", "Roboto": "Helvetica", "Comfortaa": "Courier"}
 
+
 def _safe_filename(plan: BookPlan) -> str:
     base = f"{plan.title.strip()}_{plan.subtitle.strip()}" if plan.subtitle.strip() else plan.title.strip()
     base = re.sub(r"[^\w\-]+", "_", base).strip("_")
     return re.sub(r"_+", "_", base) or "book"
 
-def _add_docx_toc(doc):
+
+def _enable_update_fields_on_open(doc: Document) -> None:
+    """Forza Word ad aggiornare i campi (incluso TOC) all'apertura."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn as _qn
+    settings = doc.settings._element
+    upd = OxmlElement("w:updateFields")
+    upd.set(_qn("w:val"), "true")
+    settings.append(upd)
+
+
+def _add_docx_toc(doc: Document) -> None:
+    # Titolo TOC
     p = doc.add_paragraph()
     run = p.add_run("Table of Contents")
     run.bold = True
     run.font.size = Pt(16)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Campo TOC (Heading 1–2 con hyperlink)
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
     p = doc.add_paragraph()
     fld = OxmlElement("w:fldSimple")
-    fld.set(_qn("w:instr"), r'TOC \o "1-3" \h \z \u')
+    fld.set(_qn("w:instr"), r'TOC \o "1-2" \h \z \u')
     p._p.append(fld)
+
 
 def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     doc = Document()
+    _enable_update_fields_on_open(doc)
+
+    # Sezione e dimensioni pagina
     sec = doc.sections[0]
     if plan.pdf_page == "8.5x11":
         sec.page_width, sec.page_height = Inches(8.5), Inches(11)
-        sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = cm_to_Cm = Cm(2.54)
-        sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = Cm(2.54)
+        margin = Cm(2.54)
     else:
         sec.page_width, sec.page_height = Inches(6), Inches(9)
+        margin = Cm(2.0)
+
+    sec.top_margin = margin
+    sec.bottom_margin = margin
+    sec.left_margin = margin
+    sec.right_margin = margin
 
     # Title page
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -584,7 +601,8 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     if plan.subtitle.strip():
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(plan.subtitle); r.font.size = Pt(16)
-    for _ in range(12): doc.add_paragraph("")
+    for _ in range(12):
+        doc.add_paragraph("")
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run(plan.author); r.font.size = Pt(12)
     doc.add_page_break()
@@ -614,9 +632,9 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
 
     # Content — Heading 1/2 reali (necessari per il ToC)
     for ch in plan.chapters:
-        p = doc.add_paragraph(ch.title); p.style = doc.styles["Heading 1"]
+        doc.add_heading(ch.title, level=1)
         for sec in ch.sections:
-            p = doc.add_paragraph(sec.title); p.style = doc.styles["Heading 2"]
+            doc.add_heading(sec.title, level=2)
             for text in sec.texts:
                 para = doc.add_paragraph(text)
                 para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
@@ -633,9 +651,11 @@ class _TocDocTemplate(SimpleDocTemplate):
                 lvl = 0 if nm == "H1" else 1
                 self.notify("TOCEntry", (lvl, f.getPlainText(), self.canv.getPageNumber()))
 
+
 def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     pagesize = PAGE_SIZES.get(plan.pdf_page, PAGE_SIZES["6x9"])
     buf = io.BytesIO()
+    # Margini: 2.54 cm su 8.5x11, 2.0 cm su 6x9 (coerente con DOCX)
     m = 2.54 * cm if plan.pdf_page == "8.5x11" else 2 * cm
     doc = _TocDocTemplate(buf, pagesize=pagesize, leftMargin=m, rightMargin=m, topMargin=m, bottomMargin=m)
     styles = getSampleStyleSheet(); fnt = PDF_FONT_MAP.get(plan.font_name, "Times-Roman")
