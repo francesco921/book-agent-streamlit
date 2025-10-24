@@ -9,14 +9,14 @@ import streamlit as st
 
 # Word/docx
 from docx import Document
-from docx.shared import Pt, Inches, cm
+from docx.shared import Pt, Inches, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # PDF
 from reportlab.lib.pagesizes import A4, letter
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.units import cm
+from reportlab.lib.units import Cm
 
 # PDF parsing
 from PyPDF2 import PdfReader
