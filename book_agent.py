@@ -135,16 +135,20 @@ for key, default in {
 # ==========================================
 # 📂 BLOCK 2 — TOC UPLOAD AND REVIEW
 # ------------------------------------------
-# User uploads TOC (DOCX or PDF), the app extracts headings,
-# detects language (or lets user choose), and allows manual
-# or AI refinement. Proceed only after final confirmation.
+# User uploads TOC (DOCX, PDF or TXT), or pastes it manually.
+# The app extracts headings, detects language (if possible),
+# allows manual or AI refinement, then confirmation.
 # ==========================================
 
-st.subheader("📄 Step 1 — Upload your TOC")
+st.subheader("📄 Step 1 — Upload or paste your TOC")
+
+# Inizializzo il contenuto editabile del TOC se non esiste
+if "toc_text_editable" not in st.session_state:
+    st.session_state["toc_text_editable"] = ""
 
 uploaded_file = st.file_uploader(
-    "Upload a file that contains the table of contents (DOCX or PDF)",
-    type=["docx", "pdf"]
+    "Upload a file that contains the table of contents (DOCX, PDF or TXT) (optional)",
+    type=["docx", "pdf", "txt"]
 )
 
 def extract_toc_from_docx(file):
@@ -170,22 +174,31 @@ def extract_toc_from_pdf(file):
                     lines.append(line)
     return "\n".join(lines)
 
+def extract_toc_from_txt(file):
+    """Extract text from TXT file, line by line."""
+    content = file.read().decode("utf-8", errors="ignore")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    return "\n".join(lines)
+
 # Localized chapter keyword to enforce in AI refinement
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
 
+# Se viene caricato un file, lo uso per pre-popolare il TOC
 if uploaded_file:
-    # --- TOC extraction ---
     with st.spinner("Reading the TOC..."):
-        if uploaded_file.name.endswith(".docx"):
+        filename = uploaded_file.name.lower()
+        if filename.endswith(".docx"):
             toc_text = extract_toc_from_docx(uploaded_file)
-        else:
+        elif filename.endswith(".pdf"):
             toc_text = extract_toc_from_pdf(uploaded_file)
+        else:  # .txt
+            toc_text = extract_toc_from_txt(uploaded_file)
 
-    # --- Language detection ---
+    # Language detection solo se abbiamo ottenuto qualcosa dal file
     detected = "auto"
-    if HAS_LANGID:
+    if toc_text.strip() and HAS_LANGID:
         try:
             detected = langid.classify(toc_text[:500])[0]
         except Exception:
@@ -193,29 +206,43 @@ if uploaded_file:
     st.session_state.detected_lang = detected
 
     # ---------- PENDING PATCH (MUST RUN BEFORE WIDGET RENDERING) ----------
-    # Se l’AI ha scritto un valore “pending”, applicalo ORA (prima della text_area)
     if "toc_text_editable_pending" in st.session_state:
         st.session_state["toc_text_editable"] = st.session_state["toc_text_editable_pending"]
         del st.session_state["toc_text_editable_pending"]
-
-    # Initialize widget state if first time
-    if "toc_text_editable" not in st.session_state:
+    else:
+        # Se non c'è una proposta AI pendente, sovrascrivo con quanto estratto dal file
         st.session_state["toc_text_editable"] = toc_text
     # ----------------------------------------------------------------------
 
-    # --- Show captured TOC ---
     st.success(f"Detected language: **{detected.upper()}**")
-    st.text_area("Captured TOC:", key="toc_text_editable", height=300)
+else:
+    # Nessun file caricato: provo eventualmente a riusare detected_lang esistente
+    detected = st.session_state.get("detected_lang", "auto")
+    if detected != "auto":
+        st.info(f"Detected language (from previous run): **{detected.upper()}**")
 
-    # --- Action buttons ---
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        confirm_toc = st.button("✅ Confirm this TOC")
-    with col2:
-        refine_toc = st.button("🧠 Refine TOC with AI")
+# Text area sempre visibile: l'utente può incollare il TOC anche senza file
+st.text_area(
+    "Captured / pasted TOC:",
+    key="toc_text_editable",
+    height=300,
+    help="You can paste your TOC directly here, or edit what has been extracted from the uploaded file."
+)
 
-    # --- AI refinement (use PENDING to avoid widget-key assignment error) ---
-    if refine_toc and OPENAI_OK:
+# --- Action buttons ---
+col1, col2 = st.columns([1, 1])
+with col1:
+    confirm_toc = st.button("✅ Confirm this TOC")
+with col2:
+    refine_toc = st.button("🧠 Refine TOC with AI")
+
+# --- AI refinement (use PENDING to avoid widget-key assignment error) ---
+if refine_toc:
+    if not OPENAI_OK:
+        st.error("OpenAI API key not configured. Cannot refine TOC with AI.")
+    elif not st.session_state["toc_text_editable"].strip():
+        st.error("TOC is empty. Paste or upload a TOC before asking AI refinement.")
+    else:
         lang_code = st.session_state.get("detected_lang", "en")
         chap_word = _chapter_word(lang_code if lang_code in ["it", "en", "es", "fr"] else "en")
 
@@ -241,18 +268,18 @@ if uploaded_file:
             )
             new_toc = (resp.choices[0].message.content or "").strip()
 
-            # Salva in PENDING e rerun; al prossimo run verrà applicato PRIMA del widget
             st.session_state["toc_text_editable_pending"] = new_toc
             st.info("AI proposal applied. Reloading the editor...")
             st.rerun()
 
-    # --- Final confirmation ---
-    if confirm_toc:
+# --- Final confirmation ---
+if confirm_toc:
+    if not st.session_state["toc_text_editable"].strip():
+        st.error("TOC is empty. Please upload or paste a valid TOC before confirming.")
+    else:
         st.session_state.confirmed_toc_text = st.session_state.toc_text_editable
         st.success("✅ TOC confirmed. You can proceed to allocation.")
 
-else:
-    st.info("Upload a TOC file to proceed.")
 
 
 # ==========================================
