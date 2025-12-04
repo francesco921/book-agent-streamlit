@@ -284,20 +284,43 @@ if confirm_toc:
 
 # ==========================================
 # 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
+# ------------------------------------------
+# Dal TOC confermato:
+# - Riconosce TOC / PARTE / CAPITOLO
+# - Identifica i sottocapitoli (foglie) e ne pulisce il titolo
+# - Legge [parole] o (blocchi) alla fine riga
+# - Se mancano allocazioni, chiede parole per OGNI sottocapitolo mancante
+# - Calcola blocchi da max 500 parole
+# - Riscrive il TOC normalizzato nell'area di testo
 # ==========================================
 
-# ========== HELPERS ==========
+# ---------- HELPERS ----------
 
 def _strip_leading_markers(s: str) -> str:
-    """Rimuove numerazioni, bullet e sporcizia iniziale."""
+    """
+    Rimuove:
+    - bullet iniziali
+    - numerazioni tipo 1., 1.1, 1) ecc.
+    - prefissi testuali tipo 'SOTTOCAPITOLO', 'Subchapter', 'Section' + eventuale numero.
+    """
     s = s.strip()
+    # bullet
     s = re.sub(r"^[\-\*\u2022]+\s*", "", s)
+    # numeri tipo 1. 1.1 1.1.1 etc
     s = re.sub(r"^\d+(?:\.\d+){0,3}[\.\)\-:]?\s*", "", s)
+    # forme tipo ".1 "
     s = re.sub(r"^\.\d+\s*", "", s)
+    # prefissi testuali di sottocapitolo / sezione
+    s = re.sub(
+        r"^(sottocapitolo|sottcapitolo|sotto capitolo|subchapter|sub-chapter|section)\s*\d*\s*[:\-\.\)]*\s*",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
     return s.strip()
 
 def _is_toc_label(ln: str) -> bool:
-    """Riconosce TOC / INDEX / INDICE in qualsiasi forma."""
+    """Riconosce TOC / INDEX / INDICE ecc."""
     s = ln.strip().lower()
     return (
         s in {"toc", "t.o.c.", "index", "indice", "table of contents"} or
@@ -305,14 +328,14 @@ def _is_toc_label(ln: str) -> bool:
     )
 
 def _is_part_label(ln: str) -> bool:
-    """Riconosce PART / PARTE, in qualsiasi lingua."""
+    """Riconosce PART / PARTE (multilingua basilare)."""
     s = ln.strip().lower()
-    return bool(re.match(r"^(part|parte|parte|парт|parte|partie)\b", s))
+    return bool(re.match(r"^(part|parte|parte|partie)\b", s))
 
 def _is_chapter_keyword_line(ln: str) -> bool:
     """
-    Riconosce CAPITOLO / CHAPTER solo come parola intera all'inizio.
-    NON confonde SOTTOCAPITOLO.
+    Riconosce CAPITOLO / CHAPTER solo come parola intera
+    all'inizio della riga (non SOTTOCAPITOLO).
     """
     s = ln.strip().lower()
     if re.match(r"^(chapter|capitolo)\b", s):
@@ -323,11 +346,18 @@ def _is_chapter_keyword_line(ln: str) -> bool:
 
 def _parse_allocation_from_title(raw: str):
     """
-    Estrae parole o blocchi:
-    - (1300)
-    - [1300]
-    - (3 blocchi)
-    - (3 blocks)
+    Estrae titolo + parole/blocchi da fine riga.
+
+    Formati supportati (alla fine):
+    - '... [800]'
+    - '... [800 words]'
+    - '... [800 parole]'
+    - '... (2 blocchi)'
+    - '... (3 blocks)'
+
+    Regola:
+    - se contiene 'block|blocks|blocchi|blocco' => blocchi
+    - altrimenti il numero è parole
     """
     text = raw.rstrip()
     words = 0
@@ -337,10 +367,9 @@ def _parse_allocation_from_title(raw: str):
     if m:
         inner = m.group(1).strip()
         text = text[:m.start()].rstrip()
-
-        num = re.search(r"(\d+)", inner)
-        if num:
-            n = int(num.group(1))
+        num_match = re.search(r"(\d+)", inner)
+        if num_match:
+            n = int(num_match.group(1))
             if re.search(r"(block|blocks|blocchi|blocco)", inner, re.IGNORECASE):
                 blocks = n
             else:
@@ -351,10 +380,12 @@ def _parse_allocation_from_title(raw: str):
 def _looks_like_chapter_without_keyword(ln: str) -> bool:
     """
     Euristica per capitoli senza parola CAPITOLO/CHAPTER.
-    NON riconosce sottocapitoli (contengono 'sotto', 'sub', 'section' ecc.)
+    NON deve riconoscere sottocapitoli (contengono 'sott', 'sub', 'section').
     """
     s = ln.strip().lower()
-    if ("sott" in s) or ("sub" in s) or ("section" in s):
+
+    # se contiene indicatori di sottosezione → non è capitolo
+    if "sott" in s or "sub" in s or "section" in s:
         return False
 
     if len(ln.split()) > 12:
@@ -367,16 +398,21 @@ def _looks_like_chapter_without_keyword(ln: str) -> bool:
         return False
     return True
 
-def parse_confirmed_toc(toc_text: str) -> List[Chapter]:
+def parse_confirmed_toc(toc_text: str):
     """
-    Risultato finale:
-    - Chapter()
-      - Section() foglia con words/blocks già riconosciuti
+    Parsing del TOC confermato.
+
+    Ritorna:
+    - chapters: List[Chapter]
+    - chapter_parts: List[Optional[str]]  (titolo PARTE associato a ogni capitolo)
     """
     lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
 
-    chapters = []
-    current_chapter = None
+    chapters: List[Chapter] = []
+    chapter_parts: List[Optional[str]] = []
+
+    current_chapter: Optional[Chapter] = None
+    current_part: Optional[str] = None
     chap_idx = 0
 
     for raw in lines:
@@ -384,157 +420,201 @@ def parse_confirmed_toc(toc_text: str) -> List[Chapter]:
         if not ln:
             continue
 
-        # Ignora TOC
+        # 1) TOC
         if _is_toc_label(ln):
             continue
 
-        # Ignora PART / PARTE
+        # 2) PART / PARTE: solo struttura, ma la teniamo per i capitoli successivi
         if _is_part_label(ln):
+            current_part = ln.strip()
             continue
 
-        # Capitolo esplicito
+        # 3) CAPITOLO esplicito
         if _is_chapter_keyword_line(ln):
             chap_idx += 1
-            title, _, _ = _parse_allocation_from_title(ln)
-            title = _strip_leading_markers(title)
-            current_chapter = Chapter(title=title)
+            title_clean, _, _ = _parse_allocation_from_title(ln)
+            title_clean = _strip_leading_markers(title_clean)
+            current_chapter = Chapter(title=title_clean)
             chapters.append(current_chapter)
+            chapter_parts.append(current_part)
             continue
 
-        # Capitolo euristico
+        # 4) CAPITOLO euristico (senza keyword)
         if current_chapter is None:
             if _looks_like_chapter_without_keyword(ln):
                 chap_idx += 1
-                title, _, _ = _parse_allocation_from_title(ln)
-                title = _strip_leading_markers(title)
-                current_chapter = Chapter(title=title)
+                title_clean, _, _ = _parse_allocation_from_title(ln)
+                title_clean = _strip_leading_markers(title_clean)
+                current_chapter = Chapter(title=title_clean)
                 chapters.append(current_chapter)
+                chapter_parts.append(current_part)
                 continue
             else:
-                # fallback: crea un capitolo generico
+                # fallback: crea capitolo generico
                 chap_idx += 1
                 current_chapter = Chapter(title=f"Chapter {chap_idx}")
                 chapters.append(current_chapter)
+                chapter_parts.append(current_part)
 
-        # Tutto il resto è sottocapitolo
-        title, words, blocks = _parse_allocation_from_title(ln)
-        title = _strip_leading_markers(title)
+        # 5) Tutto il resto = sottocapitolo foglia
+        title_clean, words, blocks = _parse_allocation_from_title(ln)
+        title_clean = _strip_leading_markers(title_clean)
 
-        if not title:
+        if not title_clean:
             continue
 
-        current_chapter.sections.append(
-            Section(title=title, target_words=words, blocks=blocks)
-        )
+        sec = Section(title=title_clean, target_words=words, blocks=blocks)
+        current_chapter.sections.append(sec)
 
-    # Ogni capitolo deve avere almeno una sezione
+    # safety: almeno 1 sezione per capitolo
     for ch in chapters:
         if not ch.sections:
             ch.sections.append(Section(title="Section 1"))
 
-    return chapters
+    return chapters, chapter_parts
 
-
-def finalize_allocation_from_toc(chapters: List[Chapter], extra_words: Optional[int] = None):
+def finalize_allocation_from_toc(chapters: List[Chapter]):
     """
-    Trasforma parole/blocchi in:
-    - target_words definitivi
-    - blocks definitivi
+    - Normalizza parole/blocchi per ogni sezione:
+      * se blocks e non words: words = blocks * MAX_SUBGEN_WORDS
+      * se words e non blocks: blocks = ceil(words / MAX_SUBGEN_WORDS)
+    - Ritorna:
+      * chapters aggiornati
+      * total_words
+      * lista sezioni ancora senza allocazione (dovrebbero essere 0
+        se lo UI ha raccolto tutto correttamente)
     """
-    all_secs = [sec for ch in chapters for sec in ch.sections]
+    all_secs: List[Section] = [sec for ch in chapters for sec in ch.sections]
 
-    # Normalize
+    # normalizza dove ho dati
     for sec in all_secs:
         if sec.blocks and not sec.target_words:
-            sec.target_words = sec.blocks * 500
-        if sec.target_words and not sec.blocks:
-            sec.blocks = math.ceil(sec.target_words / 500)
+            sec.target_words = sec.blocks * MAX_SUBGEN_WORDS
+        elif sec.target_words and not sec.blocks:
+            sec.blocks = max(1, math.ceil(sec.target_words / MAX_SUBGEN_WORDS))
 
-    # Trova sezioni senza allocazione
+    # sezioni ancora senza allocazione
     missing = [s for s in all_secs if s.target_words <= 0 or s.blocks <= 0]
-
-    # Se serve assegnare parole extra
-    if missing and extra_words:
-        n = len(missing)
-        base = extra_words // n
-        rem = extra_words % n
-
-        for i, sec in enumerate(missing):
-            sec.target_words = base + (1 if i < rem else 0)
-            if sec.target_words < 250:
-                sec.target_words = 250
-            sec.blocks = math.ceil(sec.target_words / 500)
-
-        # ricontrollo
-        missing = [s for s in all_secs if s.target_words <= 0 or s.blocks <= 0]
 
     total_words = sum(sec.target_words for sec in all_secs)
 
-    # aggiorna capitoli
+    # aggrega per capitolo
     for ch in chapters:
         ch.target_words = sum(s.target_words for s in ch.sections)
         ch.blocks = sum(s.blocks for s in ch.sections)
 
     return chapters, total_words, missing
 
+def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[str]]) -> str:
+    """
+    Ricostruisce un TOC lineare normalizzato:
 
-# ========== UI STEP 2 ==========
+    TOC
+    PARTE 1 ...
+    CAPITOLO ...
+    Titolo sottocapitolo [parole]
+    """
+    lines = []
+    lines.append("TOC")
+
+    last_part = None
+    for ch, part in zip(chapters, chapter_parts):
+        # nuova PARTE
+        if part and part != last_part:
+            lines.append(part.strip())
+            last_part = part
+
+        # titolo capitolo (così com'è stato pulito)
+        if ch.title.strip():
+            lines.append(ch.title.strip())
+
+        # sottocapitoli con parole
+        for sec in ch.sections:
+            lines.append(f"{sec.title.strip()} [{sec.target_words}]")
+
+    return "\n".join(lines)
+
+# ---------- UI STEP 2 ----------
 
 st.subheader("🧩 Step 2 — Book data & allocation")
 
 if st.session_state.confirmed_toc_text:
 
-    temp_chapters = parse_confirmed_toc(st.session_state.confirmed_toc_text)
+    # 1) Parsing TOC con struttura (PARTE + CAPITOLO + SOTTOCAPITOLO)
+    temp_chapters, chapter_parts = parse_confirmed_toc(st.session_state.confirmed_toc_text)
+
+    # individua sezioni senza parole/blocchi
     all_secs = [sec for ch in temp_chapters for sec in ch.sections]
-
     missing_initial = [s for s in all_secs if s.target_words <= 0 and s.blocks <= 0]
-    needs_global = len(missing_initial) > 0
+    needs_per_section_input = len(missing_initial) > 0
 
-    # UI METADATI BASE
-    lang_code = st.selectbox("Generation language", ["auto", "it", "en", "es", "fr"])
-    tone = st.selectbox("Tone of voice", ["Scientific", "Conversational", "Narrative"])
-    brief = st.text_area("Brief for style", height=120)
-    pdf_page = st.selectbox("Page size", ["6x9", "8.5x11"])
-    font_name = st.selectbox("Primary font", FONT_CHOICES)
+    # 2) UI: lingua, tono, brief, formato, font
+    lang_code = st.selectbox(
+        "Generation language",
+        ["auto", "it", "en", "es", "fr"],
+        index=["auto", "it", "en", "es", "fr"].index(
+            st.session_state.detected_lang if st.session_state.detected_lang in ["it", "en", "es", "fr"] else "auto"
+        ),
+        help="Leave 'auto' to use the detected language from the TOC, or force a specific language."
+    )
 
-    with st.form("book_meta_form"):
+    TONE_CHOICES_EN = ["Scientific", "Conversational", "Narrative"]
+    tone = st.selectbox("Tone of voice", TONE_CHOICES_EN, index=TONE_CHOICES_EN.index("Conversational"))
+
+    brief = st.text_area(
+        "Brief (what the model should optimize for)",
+        height=120,
+        placeholder="Example: beginner audience, practical style, real examples, avoid heavy jargon..."
+    )
+
+    pdf_page = st.selectbox("Page size", ["6x9", "8.5x11"], index=0)
+    font_name = st.selectbox("Primary font", FONT_CHOICES, index=0)
+
+    # 3) Form metadati libro + parole per sezioni senza allocazione
+    missing_specs = []
+
+    with st.form("book_info_form"):
         title = st.text_input("Book title")
         subtitle = st.text_input("Subtitle")
         author = st.text_input("Author")
 
-        extra_words = None
-        if needs_global:
+        if needs_per_section_input:
             st.warning(
-                f"There are {len(missing_initial)} sections with no allocation. "
-                f"You must provide total words to distribute."
+                f"There are {len(missing_initial)} sections without allocation "
+                f"(no words or blocks). Please specify words for each."
             )
-            min_w = len(missing_initial) * 250
-            extra_words = st.number_input(
-                "Total words for missing sections",
-                min_value=min_w,
-                step=500,
-                value=min_w
-            )
+            for idx, sec in enumerate(missing_initial):
+                v = st.number_input(
+                    f"Words for section: '{sec.title}'",
+                    min_value=MIN_SECTION_WORDS_USEFUL,
+                    step=100,
+                    value=MIN_SECTION_WORDS_USEFUL,
+                    key=f"missing_words_{idx}",
+                )
+                missing_specs.append((sec, v))
 
-        submitted = st.form_submit_button("Compute allocation")
+        submitted_meta = st.form_submit_button("Save book data & compute allocation")
 
-    if submitted:
+    if submitted_meta:
+        # assegna le parole inserite per ogni sezione mancante
+        for sec, v in missing_specs:
+            sec.target_words = int(v)
+            sec.blocks = max(1, math.ceil(sec.target_words / MAX_SUBGEN_WORDS))
 
-        chapters_alloc, total_words, missing_after = finalize_allocation_from_toc(
-            temp_chapters,
-            extra_words=extra_words
-        )
+        # 4) Finalizza allocazione
+        chapters_alloc, total_words, missing_after = finalize_allocation_from_toc(temp_chapters)
 
         if missing_after:
-            st.error("Some sections still have no allocation.")
+            st.error("Some sections are still missing allocation. Check your TOC or the per-section words.")
             st.stop()
 
-        plan = BookPlan(
+        # 5) Costruisce il piano di libro
+        plan_preview = BookPlan(
             title=title or "Title",
             subtitle=subtitle or "",
             author=author or "",
             total_words=total_words,
-            block_size=500,
+            block_size=MAX_SUBGEN_WORDS,
             chapters=chapters_alloc,
             language_code=lang_code,
             tone=tone,
@@ -543,19 +623,30 @@ if st.session_state.confirmed_toc_text:
             font_name=font_name,
         )
 
-        st.session_state.generated_plan = plan
+        st.session_state.generated_plan = plan_preview
         st.session_state.chapters = chapters_alloc
         st.session_state.allocation_done = True
 
-        st.success(f"Total words: {total_words}")
+        # 6) Riscrive il TOC normalizzato nell'area di testo
+        new_toc = rebuild_toc_from_plan(chapters_alloc, chapter_parts)
+        st.session_state["toc_text_editable"] = new_toc
+        st.session_state["confirmed_toc_text"] = new_toc
 
+        st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC normalized and updated above.")
+
+        # 7) Preview allocazione
         for i, ch in enumerate(chapters_alloc, start=1):
-            with st.expander(f"Chapter {i}: {ch.title}"):
-                for sec in ch.sections:
-                    st.write(f"- {sec.title} → {sec.target_words} words → {sec.blocks} blocks")
+            with st.expander(f"Chapter {i}: {ch.title} — {ch.target_words} words — {ch.blocks} total blocks"):
+                for j, sec in enumerate(ch.sections, start=1):
+                    st.write(
+                        f"• Section {j}: {sec.title} — {sec.target_words} words — "
+                        f"{sec.blocks} blocks (≤{MAX_SUBGEN_WORDS} words each)"
+                    )
 
+        st.info("When satisfied, proceed to content generation.")
 else:
     st.warning("Please confirm the TOC in Step 1 first.")
+
 
 
 # ==========================================
