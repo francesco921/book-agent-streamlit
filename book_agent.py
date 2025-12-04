@@ -627,12 +627,16 @@ if st.session_state.confirmed_toc_text:
         st.session_state.chapters = chapters_alloc
         st.session_state.allocation_done = True
 
-        # 6) Riscrive il TOC normalizzato nell'area di testo
+        # 6) Prepara il TOC normalizzato per la text_area (usando PENDING)
         new_toc = rebuild_toc_from_plan(chapters_alloc, chapter_parts)
-        st.session_state["toc_text_editable"] = new_toc
+        st.session_state["toc_text_editable_pending"] = new_toc
         st.session_state["confirmed_toc_text"] = new_toc
 
-        st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC normalized and updated above.")
+        st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC has been normalized.")
+
+        # Forzo un rerun così Step 1 applica il valore pending
+        st.experimental_rerun()
+
 
         # 7) Preview allocazione
         for i, ch in enumerate(chapters_alloc, start=1):
