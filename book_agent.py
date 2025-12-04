@@ -135,16 +135,26 @@ for key, default in {
 # ==========================================
 # 📂 BLOCK 2 — TOC UPLOAD AND REVIEW
 # ------------------------------------------
-# User uploads TOC (DOCX, PDF or TXT), or pastes it manually.
-# The app extracts headings, detects language (if possible),
-# allows manual or AI refinement, then confirmation.
+# - Upload DOCX / PDF / TXT (opzionale)
+# - Oppure incolla direttamente il TOC
+# - Refine TOC con AI (usa chiave OpenAI se presente)
+# - Conferma TOC per passare allo Step 2
 # ==========================================
 
 st.subheader("📄 Step 1 — Upload or paste your TOC")
 
-# Inizializzo il contenuto editabile del TOC se non esiste
+# Applica eventuale TOC "pending" PRIMA di creare il widget
+if "toc_text_editable_pending" in st.session_state:
+    st.session_state["toc_text_editable"] = st.session_state["toc_text_editable_pending"]
+    del st.session_state["toc_text_editable_pending"]
+
+# Inizializza stato
 if "toc_text_editable" not in st.session_state:
     st.session_state["toc_text_editable"] = ""
+if "detected_lang" not in st.session_state:
+    st.session_state["detected_lang"] = "auto"
+if "_last_uploaded_name" not in st.session_state:
+    st.session_state["_last_uploaded_name"] = None
 
 uploaded_file = st.file_uploader(
     "Upload a file that contains the table of contents (DOCX, PDF or TXT) (optional)",
@@ -185,43 +195,41 @@ def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
 
-# Se viene caricato un file, lo uso per pre-popolare il TOC
+# Se viene caricato un file, leggo il TOC ma NON sovrascrivo sempre:
+# solo se è un file nuovo (nome diverso)
 if uploaded_file:
+    filename = uploaded_file.name.lower()
+
     with st.spinner("Reading the TOC..."):
-        filename = uploaded_file.name.lower()
         if filename.endswith(".docx"):
             toc_text = extract_toc_from_docx(uploaded_file)
         elif filename.endswith(".pdf"):
             toc_text = extract_toc_from_pdf(uploaded_file)
-        else:  # .txt
+        else:
             toc_text = extract_toc_from_txt(uploaded_file)
 
-    # Language detection solo se abbiamo ottenuto qualcosa dal file
+    # Language detection solo se c'è testo
     detected = "auto"
     if toc_text.strip() and HAS_LANGID:
         try:
             detected = langid.classify(toc_text[:500])[0]
         except Exception:
             detected = "auto"
-    st.session_state.detected_lang = detected
+    st.session_state["detected_lang"] = detected
 
-    # ---------- PENDING PATCH (MUST RUN BEFORE WIDGET RENDERING) ----------
-    if "toc_text_editable_pending" in st.session_state:
-        st.session_state["toc_text_editable"] = st.session_state["toc_text_editable_pending"]
-        del st.session_state["toc_text_editable_pending"]
-    else:
-        # Se non c'è una proposta AI pendente, sovrascrivo con quanto estratto dal file
+    # Se è un nuovo file, popolo la text_area con il contenuto estratto
+    if st.session_state["_last_uploaded_name"] != uploaded_file.name:
         st.session_state["toc_text_editable"] = toc_text
-    # ----------------------------------------------------------------------
+        st.session_state["_last_uploaded_name"] = uploaded_file.name
 
     st.success(f"Detected language: **{detected.upper()}**")
 else:
-    # Nessun file caricato: provo eventualmente a riusare detected_lang esistente
+    # Nessun file: mostro eventuale lingua rilevata in passato
     detected = st.session_state.get("detected_lang", "auto")
     if detected != "auto":
         st.info(f"Detected language (from previous run): **{detected.upper()}**")
 
-# Text area sempre visibile: l'utente può incollare il TOC anche senza file
+# Text area SEMPRE visibile per incolla/manual edit
 st.text_area(
     "Captured / pasted TOC:",
     key="toc_text_editable",
@@ -229,14 +237,14 @@ st.text_area(
     help="You can paste your TOC directly here, or edit what has been extracted from the uploaded file."
 )
 
-# --- Action buttons ---
+# Bottoni azione
 col1, col2 = st.columns([1, 1])
 with col1:
     confirm_toc = st.button("✅ Confirm this TOC")
 with col2:
     refine_toc = st.button("🧠 Refine TOC with AI")
 
-# --- AI refinement (use PENDING to avoid widget-key assignment error) ---
+# AI refinement
 if refine_toc:
     if not OPENAI_OK:
         st.error("OpenAI API key not configured. Cannot refine TOC with AI.")
@@ -268,20 +276,18 @@ if refine_toc:
             )
             new_toc = (resp.choices[0].message.content or "").strip()
 
-            st.session_state["toc_text_editable_pending"] = new_toc
-            st.info("AI proposal applied. Reloading the editor...")
-            st.rerun()
+        # Applico via PENDING + rerun per evitare conflitti con widget
+        st.session_state["toc_text_editable_pending"] = new_toc
+        st.info("AI proposal applied. Reloading the editor...")
+        st.rerun()
 
-# --- Final confirmation ---
+# Conferma TOC
 if confirm_toc:
     if not st.session_state["toc_text_editable"].strip():
         st.error("TOC is empty. Please upload or paste a valid TOC before confirming.")
     else:
         st.session_state.confirmed_toc_text = st.session_state.toc_text_editable
         st.success("✅ TOC confirmed. You can proceed to allocation.")
-
-
-
 # ==========================================
 # 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
 # ------------------------------------------
@@ -627,7 +633,7 @@ if st.session_state.confirmed_toc_text:
         st.session_state.chapters = chapters_alloc
         st.session_state.allocation_done = True
 
-        # 6) Prepara il TOC normalizzato per la text_area (usando PENDING)
+               # 6) Prepara il TOC normalizzato per la text_area (usando PENDING)
         new_toc = rebuild_toc_from_plan(chapters_alloc, chapter_parts)
         st.session_state["toc_text_editable_pending"] = new_toc
         st.session_state["confirmed_toc_text"] = new_toc
@@ -635,7 +641,8 @@ if st.session_state.confirmed_toc_text:
         st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC has been normalized.")
 
         # Forzo un rerun così Step 1 applica il valore pending
-        st.experimental_rerun()
+        st.rerun()
+
 
 
         # 7) Preview allocazione
