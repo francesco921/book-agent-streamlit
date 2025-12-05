@@ -286,7 +286,7 @@ with col1:
 with col2:
     refine_toc = st.button("Refine TOC with AI")
 
-# AI REFINEMENT
+# AI REFINEMENT (preserva allocazioni di parole/blocchi)
 if refine_toc:
     toc_raw = st.session_state.get("toc_text_editable", "").strip()
 
@@ -304,25 +304,32 @@ if refine_toc:
         with st.spinner("Refining TOC..."):
             prompt = (
                 "You are a professional non-fiction book editor.\n"
-                "Clean, normalize and structure the following TOC.\n"
+                "Clean, normalize and structure the following TOC, while strictly preserving any numeric allocation.\n\n"
                 "RULES:\n"
                 f"- Main chapters: prefix with '{chap_word} X'\n"
                 f"- Subchapters: prefix with '{sub_word} X.Y'\n"
                 "- Use decimal numbering (1.1, 1.2, 2.1, ...)\n"
-                "- Keep all meaning, keep hierarchy\n"
-                "- No commentary, no extra text\n"
-                "- Output ONLY the cleaned list\n\n"
-                f"Original TOC:\n{toc_raw}"
+                "- Keep all meaning, keep hierarchy.\n"
+                "- PRESERVE ANY explicit word or block allocations.\n"
+                "  Examples of allocations you MUST keep:\n"
+                "    [800], [800 words], [800 parole], (800), (2 blocks), (3 blocchi) and similar.\n"
+                "- If an allocation appears in the middle of the line, MOVE IT to the end of that line.\n"
+                "- NEVER change the number inside an allocation.\n"
+                "- NEVER delete allocations.\n"
+                "- No commentary, no extra text.\n"
+                "- Output ONLY the cleaned list, one entry per line.\n\n"
+                "Original TOC:\n"
+                f"{toc_raw}"
             )
 
             resp = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You refine book TOCs."},
+                    {"role": "system", "content": "You refine book TOCs and preserve numeric allocations accurately."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                max_tokens=800
+                temperature=0.2,
+                max_tokens=1500
             )
 
             refined = (resp.choices[0].message.content or "").strip()
@@ -382,14 +389,33 @@ def _is_chapter_keyword_line(ln: str) -> bool:
     return False
 
 def _parse_allocation_from_title(raw: str):
+    """
+    Estrae titolo + parole/blocchi da una riga di TOC.
+
+    Formati supportati (possono stare ovunque nella riga):
+    - '... [800]'
+    - '... [800 words]'
+    - '... [800 parole]'
+    - '... (2 blocchi)'
+    - '... (3 blocks)'
+
+    Regola:
+    - se il testo tra parentesi parla di block/blocks/blocchi/blocco -> blocchi
+    - altrimenti il numero viene interpretato come parole
+    """
     text = raw.rstrip()
     words = 0
     blocks = 0
 
-    m = re.search(r'[\[\(]([^\]\)]*)[\]\)]\s*$', text)
-    if m:
+    # cerchiamo l'ultima parentesi [] o () nella riga
+    matches = list(re.finditer(r'[\[\(]([^\]\)]*)[\]\)]', text))
+    if matches:
+        m = matches[-1]
         inner = m.group(1).strip()
-        text = text[:m.start()].rstrip()
+
+        # rimuoviamo solo quella parentesi dal testo
+        text = (text[:m.start()] + text[m.end():]).strip()
+
         num_match = re.search(r"(\d+)", inner)
         if num_match:
             n = int(num_match.group(1))
@@ -898,7 +924,6 @@ def generate_all_sections(plan: BookPlan):
                     opening_snippet = " ".join(opening_words[:10]).lower()
                     if opening_snippet and opening_snippet not in used_openings:
                         used_openings.append(opening_snippet)
-                    # opzionale: limita la lunghezza della lista
                     if len(used_openings) > 40:
                         used_openings = used_openings[-40:]
 
