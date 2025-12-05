@@ -138,7 +138,6 @@ for key, default in {
 # ==========================================
 # BLOCK 2 - TOC UPLOAD AND REVIEW
 # ==========================================
-
 st.subheader("Step 1 - Upload or paste your TOC")
 
 # Session state initialization for TOC
@@ -529,7 +528,6 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
     return "\n".join(lines).strip()
 
 # UI STEP 2
-
 st.subheader("Step 2 - Book data & allocation")
 
 confirmed_toc = st.session_state.get("confirmed_toc_text", "") or ""
@@ -676,7 +674,6 @@ else:
 # ==========================================
 # BLOCK 4 - CONTENT GENERATION & EXPORT
 # ==========================================
-
 st.subheader("Step 3 - Content generation & export")
 
 def _effective_language_label(plan: BookPlan) -> str:
@@ -717,6 +714,7 @@ def generate_block_text(
     target_words: int,
     prev_summary: str = "",
     is_last_block: bool = False,
+    forbidden_openings: Optional[List[str]] = None,  # lista di aperture gia usate nel capitolo
 ) -> str:
     lang = _effective_language_label(plan)
     tone_ins = _tone_instruction(plan.tone)
@@ -729,7 +727,8 @@ def generate_block_text(
         f"Write in {lang}. {tone_ins} "
         "Maintain logical coherence across the whole book and between consecutive sections. "
         "Avoid repetition and do not restate book, chapter or section titles. "
-        "Write continuous prose only, no bullet lists, no headings, no markdown."
+        "Write continuous prose only, no bullet lists, no headings, no markdown. "
+        "Vary your sentence openings and syntactic structures across sections so they are not mechanically similar."
     )
 
     focus_clause = ""
@@ -764,15 +763,34 @@ def generate_block_text(
 
     if plan.technical_depth:
         tech_clause = (
-            " Prioritize technical depth, mechanistic explanations and explicit frameworks whenever appropriate. "
-            "When relevant, describe variables, agents or components, causal chains, feedback loops and rate-limiting factors. "
-            "Use pseudo-citations in natural language style such as 'clinical practice suggests', 'in experimental models', "
-            "without real article titles or DOIs."
+            " When appropriate, prioritize technical depth, mechanistic explanations and explicit frameworks. "
+            "Describe variables, agents or components, causal chains, feedback loops and rate-limiting factors when relevant. "
         )
     else:
         tech_clause = ""
 
-    prompt_sys = base_sys + focus_clause + " " + depth_instructions + tech_clause + anti_fluff_clause
+    forbidden_clause = ""
+    if forbidden_openings:
+        # prendiamo solo le ultime N per non appesantire troppo
+        last_openings = forbidden_openings[-12:]
+        joined = "\n".join(f"- {op}" for op in last_openings)
+        forbidden_clause = (
+            " The following are opening snippets already used in other sections of this chapter:\n"
+            f"{joined}\n"
+            "Do NOT start this section with a sentence whose structure, rhythm or semantic framing closely resembles any of them. "
+            "Use a new syntactic pattern and a distinct way of entering into the topic."
+        )
+
+    prompt_sys = (
+        base_sys
+        + focus_clause
+        + " "
+        + depth_instructions
+        + tech_clause
+        + anti_fluff_clause
+        + " "
+        + forbidden_clause
+    )
 
     chunks = []
 
@@ -791,9 +809,14 @@ def generate_block_text(
                 )
         else:
             if idx == 0:
-                position_note = "You may use a short contextual introduction before getting into the core idea."
+                position_note = (
+                    "You may use a short contextual introduction before getting into the core idea, "
+                    "but keep it concise and relevant."
+                )
             else:
-                position_note = "Continue the section, keeping the content coherent with what you already wrote."
+                position_note = (
+                    "Continue the section, keeping the content coherent with what you already wrote."
+                )
 
         if idx == n_sub - 1 and is_last_block:
             position_note += (
@@ -839,12 +862,18 @@ def generate_all_sections(plan: BookPlan):
     prev_summary = ""
 
     for ch in plan.chapters:
+        # lista di aperture gia usate dentro questo capitolo
+        used_openings: List[str] = []
+
         for sec in ch.sections:
             sec.texts = []
 
             block_target = max(1, math.ceil(sec.target_words / max(1, sec.blocks)))
 
             for b in range(sec.blocks):
+                # Per il primo sub-blocco della sezione usiamo le aperture vietate
+                forbidden = used_openings if b == 0 else None
+
                 text = generate_block_text(
                     plan,
                     ch_title=ch.title,
@@ -852,14 +881,26 @@ def generate_all_sections(plan: BookPlan):
                     target_words=block_target,
                     prev_summary=prev_summary,
                     is_last_block=(b == sec.blocks - 1),
+                    forbidden_openings=forbidden,
                 )
                 sec.texts.append(text)
 
+                # Aggiorna prev_summary per la continuita
                 words = re.split(r"\s+", text.strip())
                 if len(words) > 120:
                     prev_summary = " ".join(words[:60]) + " ... " + " ".join(words[-40:])
                 else:
                     prev_summary = text[:800]
+
+                # Traccia l apertura della sezione (solo dal primo blocco)
+                if b == 0 and text.strip():
+                    opening_words = re.split(r"\s+", text.strip())
+                    opening_snippet = " ".join(opening_words[:10]).lower()
+                    if opening_snippet and opening_snippet not in used_openings:
+                        used_openings.append(opening_snippet)
+                    # opzionale: limita la lunghezza della lista
+                    if len(used_openings) > 40:
+                        used_openings = used_openings[-40:]
 
                 done += 1
                 bar.progress(done / total_blocks, text=f"Blocks completed: {done}/{total_blocks}")
@@ -868,7 +909,6 @@ def generate_all_sections(plan: BookPlan):
     st.success("Content generation completed.")
 
 # EXPORT HELPERS
-
 PDF_FONT_MAP = {
     "Times New Roman": "Times-Roman",
     "Roboto": "Helvetica",
@@ -1106,7 +1146,6 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     return buf.getvalue()
 
 # UI BUTTONS FINAL
-
 if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
     plan: BookPlan = st.session_state.generated_plan
 
