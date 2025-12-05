@@ -17,7 +17,7 @@ import os
 import re
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import streamlit as st
 from docx import Document
@@ -70,7 +70,7 @@ LANG_LABELS = {
 
 # Formati pagina da libro (limitati a 6x9 e 8.5x11 come richiesto)
 PAGE_SIZES = {
-    "6x9": (6 * 72, 9 * 72),           # pollici -> punti tipografici
+    "6x9": (6 * 72, 9 * 72),
     "8.5x11": (8.5 * 72, 11 * 72),
 }
 
@@ -85,8 +85,7 @@ class Section:
     title: str
     target_words: int = 0
     blocks: int = 0
-    texts: List[str] = field(default_factory=list)  # testi finali dei sottoblocchi
-    # micro-outline interno, uno slot per blocco
+    texts: List[str] = field(default_factory=list)
     subtopics: List[str] = field(default_factory=list)
 
 @dataclass
@@ -104,18 +103,16 @@ class BookPlan:
     total_words: int
     block_size: int
     chapters: List[Chapter] = field(default_factory=list)
-    language_code: str = "auto"          # "auto", "it", "en", "es", "fr"
-    tone: str = "Conversational"         # UI inglese
-    brief: str = ""                      # descrizione breve che guida lo stile
-    pdf_page: str = "6x9"                # formato libro
-    font_name: str = "Times New Roman"   # font preferito
+    language_code: str = "auto"
+    tone: str = "Conversational"
+    brief: str = ""
+    pdf_page: str = "6x9"
+    font_name: str = "Times New Roman"
     chapter_parts: List[Optional[str]] = field(default_factory=list)
-    # Modalita di profondita tecnica specifica
     technical_depth: bool = False
-    # Nuove impostazioni di stile selezionabili dall utente
-    writing_mode: str = "Professional Manual"   # General / Introductory, Professional Manual, Expert / Technical
-    direct_style: bool = True                   # niente domande, niente intro generiche
-    strict_focus: bool = True                   # aderire strettamente al topic
+    writing_mode: str = "Professional Manual"
+    direct_style: bool = True
+    strict_focus: bool = True
 
 # ==========================================
 # IMPOSTAZIONI BASE DELLA PAGINA (UI in inglese)
@@ -142,7 +139,6 @@ for key, default in {
 # ==========================================
 st.subheader("Step 1 - Upload or paste your TOC")
 
-# Session state initialization for TOC
 if "toc_text_editable" not in st.session_state:
     st.session_state["toc_text_editable"] = ""
 
@@ -152,12 +148,10 @@ if "detected_lang" not in st.session_state:
 if "_last_uploaded_name" not in st.session_state:
     st.session_state["_last_uploaded_name"] = None
 
-# Applica eventuale pending update
 if "toc_text_pending" in st.session_state:
     st.session_state["toc_text_editable"] = st.session_state["toc_text_pending"]
     del st.session_state["toc_text_pending"]
 
-# File extraction helpers
 def extract_toc_from_docx(file):
     doc = Document(file)
     lines = []
@@ -184,7 +178,6 @@ def extract_toc_from_txt(file):
     lines = [ln for ln in content.splitlines() if ln.strip()]
     return "\n".join(lines)
 
-# Chapter/Subchapter word per lingua
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
@@ -198,7 +191,6 @@ def _subchapter_word(lang_code: str) -> str:
     }
     return mapping.get(lang_code, "Subchapter")
 
-# Language inference
 def _infer_lang_from_text(raw: str, detected: str) -> str:
     raw_l = raw.lower()
 
@@ -212,7 +204,6 @@ def _infer_lang_from_text(raw: str, detected: str) -> str:
         return detected
     return "en"
 
-# Normalizzazione dei sottocapitoli dopo refine
 def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
     sub_label = _subchapter_word(lang_code)
 
@@ -241,7 +232,6 @@ def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
 
     return "\n".join(out)
 
-# File uploader
 uploaded_file = st.file_uploader(
     "Upload TOC (DOCX, PDF or TXT) - optional",
     type=["docx", "pdf", "txt"]
@@ -273,7 +263,6 @@ if uploaded_file:
 
     st.success(f"Detected language: {lang_code.upper()}")
 
-# Textarea TOC
 current_toc = st.text_area(
     "Captured / pasted TOC:",
     key="toc_text_editable",
@@ -281,14 +270,12 @@ current_toc = st.text_area(
     help="Paste or edit your TOC here."
 )
 
-# Buttons
 col1, col2 = st.columns(2)
 with col1:
     confirm_toc = st.button("Confirm this TOC")
 with col2:
     refine_toc = st.button("Refine TOC with AI")
 
-# AI REFINEMENT
 if refine_toc:
     toc_raw = st.session_state.get("toc_text_editable", "").strip()
 
@@ -338,7 +325,6 @@ if refine_toc:
         st.success("TOC refined.")
         st.rerun()
 
-# Confirm TOC
 if confirm_toc:
     toc_raw = st.session_state.get("toc_text_editable", "").strip()
     if not toc_raw:
@@ -529,7 +515,6 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
 
     return "\n".join(lines).strip()
 
-# UI STEP 2
 st.subheader("Step 2 - Book data & allocation")
 
 confirmed_toc = st.session_state.get("confirmed_toc_text", "") or ""
@@ -563,7 +548,6 @@ else:
         help="When enabled, the model will write with maximum technical depth and mechanistic detail."
     )
 
-    # Nuove opzioni selezionabili dall utente
     writing_mode = st.selectbox(
         "Writing mode",
         ["General / Introductory", "Professional Manual", "Expert / Technical"],
@@ -592,8 +576,7 @@ else:
     pdf_page = st.selectbox("Page size", ["6x9", "8.5x11"], index=0)
     font_name = st.selectbox("Primary font", FONT_CHOICES, index=0)
 
-    # Metadati libro + parole mancanti
-    missing_specs = []
+    missing_specs: List[Any] = []
 
     with st.form("book_info_form"):
         title = st.text_input("Book title")
@@ -693,13 +676,7 @@ def _tone_instruction(tone: str) -> str:
         return "Use a narrative, evocative tone with smooth transitions."
     return "Use a clear, friendly, and practical tone."
 
-# Pianificazione dei subtopic per le sezioni multi-blocco
 def plan_section_subtopics(plan: BookPlan):
-    """
-    Per ogni sezione con blocks > 1, chiede al modello un micro-outline interno:
-    - esattamente `blocks` subtopic
-    - uno per ciascun blocco
-    """
     if not OPENAI_OK:
         return
 
@@ -708,7 +685,7 @@ def plan_section_subtopics(plan: BookPlan):
     for ch in plan.chapters:
         for sec in ch.sections:
             if sec.blocks <= 1:
-                continue  # non serve outline interno
+                continue
 
             try:
                 prompt_sys = "You design internal outlines for high-level nonfiction sections."
@@ -775,6 +752,44 @@ def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
     except Exception as e:
         return f"[generation error] {e}"
 
+# Analisi della struttura stilistica di un blocco
+def analyze_style(text: str) -> Dict[str, Any]:
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return {}
+
+    avg_len = sum(len(s.split()) for s in sentences) / max(1, len(sentences))
+    first_sentence = sentences[0].lower()
+
+    pattern = "unknown"
+    if any(first_sentence.startswith(x) for x in ["la ", "il ", "lo ", "l'", "l’"]):
+        pattern = "definition_start"
+    elif "perché" in first_sentence or "because" in first_sentence:
+        pattern = "causal_start"
+    elif "quando" in first_sentence or "when " in first_sentence:
+        pattern = "conditional_start"
+    elif "in questo contesto" in first_sentence or "in this context" in first_sentence:
+        pattern = "contextual_start"
+
+    transition_words = []
+    candidates = [
+        "inoltre", "pertanto", "tuttavia", "in questo contesto", "di conseguenza",
+        "in practical terms", "moreover", "however", "consequently", "per contro",
+        "d'altra parte", "d’altra parte"
+    ]
+    low_text = text.lower()
+    for w in candidates:
+        if w in low_text:
+            transition_words.append(w)
+
+    return {
+        "avg_sentence_length": avg_len,
+        "first_sentence_pattern": pattern,
+        "transition_words": transition_words,
+    }
+
 def generate_block_text(
     plan: BookPlan,
     ch_title: str,
@@ -785,6 +800,7 @@ def generate_block_text(
     forbidden_openings: Optional[List[str]] = None,
     section_history: str = "",
     subtopic: str = "",
+    chapter_style_memory: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     lang = _effective_language_label(plan)
     tone_ins = _tone_instruction(plan.tone)
@@ -873,6 +889,26 @@ def generate_block_text(
             " For this block, focus on a single clear angle or subtopic of the section instead of giving a generic overview."
         )
 
+    style_memory_clause = ""
+    if chapter_style_memory:
+        last_styles = chapter_style_memory[-3:]
+        if last_styles:
+            style_memory_clause += "\nThese stylistic patterns have ALREADY been used in this chapter. Do NOT repeat them:\n"
+            for i, st in enumerate(last_styles, 1):
+                style_memory_clause += (
+                    f"\nPreviously used style {i}:\n"
+                    f"- Approx average sentence length: {st.get('avg_sentence_length', 'N/A')}\n"
+                    f"- First sentence pattern: {st.get('first_sentence_pattern', 'N/A')}\n"
+                    f"- Transition words: {', '.join(st.get('transition_words', [])) or 'None'}\n"
+                )
+            style_memory_clause += (
+                "\nYou MUST generate a block that does NOT repeat any of these stylistic patterns.\n"
+                "- Use a different type of opening (for example, start from consequences, edge conditions or specific contexts instead of a definition).\n"
+                "- Use a different sentence length distribution (if previous blocks used medium-length sentences, now prefer shorter or longer ones).\n"
+                "- Avoid reusing the transition words listed above and prefer alternative connectors.\n"
+                "- Change the macro-level logical order (for example, start from edge cases or constraints and then move back to the core mechanism).\n"
+            )
+
     prompt_sys = (
         base_sys
         + focus_clause
@@ -884,9 +920,11 @@ def generate_block_text(
         + forbidden_clause
         + " "
         + repetition_guard
+        + " "
+        + style_memory_clause
     )
 
-    chunks = []
+    chunks: List[str] = []
 
     for idx in range(n_sub):
         if plan.direct_style:
@@ -960,7 +998,6 @@ def generate_all_sections(plan: BookPlan):
         st.warning("No blocks to generate. Check your allocation.")
         return
 
-    # Pianifica il micro-outline interno per le sezioni multi-blocco
     plan_section_subtopics(plan)
 
     bar = st.progress(0, text="Writing in progress...")
@@ -968,8 +1005,8 @@ def generate_all_sections(plan: BookPlan):
     prev_summary = ""
 
     for ch in plan.chapters:
-        # lista di aperture gia usate dentro questo capitolo
         used_openings: List[str] = []
+        chapter_style_memory: List[Dict[str, Any]] = []
 
         for sec in ch.sections:
             sec.texts = []
@@ -977,7 +1014,6 @@ def generate_all_sections(plan: BookPlan):
             block_target = max(1, math.ceil(sec.target_words / max(1, sec.blocks)))
 
             for b in range(sec.blocks):
-                # Memoria specifica della sezione: testo gia scritto in questa sezione
                 if b == 0:
                     section_history = ""
                 else:
@@ -988,12 +1024,10 @@ def generate_all_sections(plan: BookPlan):
                     else:
                         section_history = already
 
-                # Subtopic dedicato a questo blocco (se pianificato)
                 current_subtopic = ""
                 if sec.subtopics and b < len(sec.subtopics):
                     current_subtopic = sec.subtopics[b]
 
-                # Per il primo sub-blocco della sezione usiamo le aperture vietate
                 forbidden = used_openings if b == 0 else None
 
                 text = generate_block_text(
@@ -1006,17 +1040,22 @@ def generate_all_sections(plan: BookPlan):
                     forbidden_openings=forbidden,
                     section_history=section_history,
                     subtopic=current_subtopic,
+                    chapter_style_memory=chapter_style_memory,
                 )
                 sec.texts.append(text)
 
-                # Aggiorna prev_summary per la continuita globale del libro
+                style_info = analyze_style(text)
+                if style_info:
+                    chapter_style_memory.append(style_info)
+                    if len(chapter_style_memory) > 40:
+                        chapter_style_memory = chapter_style_memory[-40:]
+
                 words = re.split(r"\s+", text.strip())
                 if len(words) > 120:
                     prev_summary = " ".join(words[:60]) + " ... " + " ".join(words[-40:])
                 else:
                     prev_summary = text[:800]
 
-                # Traccia l apertura della sezione (solo dal primo blocco)
                 if b == 0 and text.strip():
                     opening_words = re.split(r"\s+", text.strip())
                     opening_snippet = " ".join(opening_words[:10]).lower()
@@ -1193,7 +1232,7 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     TitleC = ParagraphStyle("TitleC", parent=styles["Title"], fontName=fnt, alignment=TA_CENTER, spaceAfter=20)
     SubC = ParagraphStyle("SubC", parent=styles["BodyText"], fontName=fnt, alignment=TA_CENTER, spaceBefore=6, spaceAfter=40)
 
-    story = []
+    story: List[Any] = []
 
     story += [Spacer(1, 40), Paragraph(plan.title, TitleC)]
     if plan.subtitle.strip():
@@ -1268,7 +1307,6 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     doc.build(story)
     return buf.getvalue()
 
-# UI BUTTONS FINAL
 if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
     plan: BookPlan = st.session_state.generated_plan
 
