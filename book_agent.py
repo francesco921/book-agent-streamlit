@@ -110,14 +110,14 @@ class BookPlan:
     brief: str = ""                      # descrizione breve che guida lo stile
     pdf_page: str = "6x9"                # formato libro
     font_name: str = "Times New Roman"   # font preferito
-    # NUOVO: parte associata a ciascun capitolo (stessa lunghezza di chapters)
+    # parte associata a ciascun capitolo (stessa lunghezza di chapters)
     chapter_parts: List[Optional[str]] = field(default_factory=list)
 
 # ==========================================
 # 🖥️ IMPOSTAZIONI BASE DELLA PAGINA (UI in inglese)
 # ==========================================
-st.set_page_config(page_title="Book Agent — Book Generator", page_icon="📘", layout="wide")
-st.title("📘 Book Agent — Book Generator")
+st.set_page_config(page_title="Book Agent - Book Generator", page_icon="📘", layout="wide")
+st.title("📘 Book Agent - Book Generator")
 st.caption("Upload TOC → review/approve → generate → download DOCX/PDF")
 
 # Inizializzo “memoria” (serve dopo)
@@ -135,15 +135,14 @@ for key, default in {
 
 
 # ==========================================
-# 📂 BLOCK 2 — TOC UPLOAD AND REVIEW (FINAL FIXED VERSION)
+# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL FIXED VERSION)
 # ==========================================
 
-st.subheader("📄 Step 1 — Upload or paste your TOC")
+st.subheader("📄 Step 1 - Upload or paste your TOC")
 
 # ------------------------------------------
 # Apply pending TOC (if any)
 # ------------------------------------------
-# Questa logica serve SOLO se in futuro usi pending, qui la manteniamo compatibile
 if "toc_text_editable" not in st.session_state:
     st.session_state["toc_text_editable"] = ""
 
@@ -158,7 +157,7 @@ if "_last_uploaded_name" not in st.session_state:
 # File uploader
 # ------------------------------------------
 uploaded_file = st.file_uploader(
-    "Upload TOC (DOCX, PDF or TXT) — optional",
+    "Upload TOC (DOCX, PDF or TXT) - optional",
     type=["docx", "pdf", "txt"]
 )
 
@@ -223,13 +222,11 @@ if uploaded_file:
 
 
 # ------------------------------------------
-# TEXT AREA DEL TOC (finalmente stabile)
+# TEXT AREA DEL TOC (stabile)
 # ------------------------------------------
 
-# VALORE LOGICO
 current_toc = st.session_state["toc_text_editable"]
 
-# WIDGET con chiave DIVERSA da quella logica
 new_toc = st.text_area(
     "Captured / pasted TOC:",
     value=current_toc,
@@ -238,7 +235,6 @@ new_toc = st.text_area(
     help="Paste or edit your TOC here."
 )
 
-# Se l’utente modifica il contenuto → aggiorno stato logico
 if new_toc != current_toc:
     st.session_state["toc_text_editable"] = new_toc
     current_toc = new_toc
@@ -289,7 +285,6 @@ if refine_toc:
             )
             refined = (resp.choices[0].message.content or "").strip()
 
-        # Aggiorno direttamente stato logico
         st.session_state["toc_text_editable"] = refined
         st.session_state["confirmed_toc_text"] = refined
 
@@ -307,8 +302,9 @@ if confirm_toc:
         st.session_state["confirmed_toc_text"] = current_toc
         st.success("TOC confirmed. Proceed to Step 2.")
 
+
 # ==========================================
-# 🧮 BLOCK 3 — WORD ALLOCATION & 500-WORD BLOCKING
+# 🧮 BLOCK 3 - WORD ALLOCATION & 500-WORD BLOCKING
 # ==========================================
 
 # ---------- PARSING HELPERS ----------
@@ -420,7 +416,7 @@ def parse_confirmed_toc(toc_text: str):
 
     Ritorna:
     - chapters: List[Chapter]
-    - chapter_parts: List[Optional[str]]  → titolo PARTE associato a ogni capitolo
+    - chapter_parts: List[Optional[str]] → titolo PARTE associato a ogni capitolo
 
     Regole:
     - INTRODUZIONE (senza sottocapitoli) diventa capitolo singolo.
@@ -575,10 +571,9 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
     return "\n".join(lines).strip()
 
 
-
 # ---------- UI STEP 2 ----------
 
-st.subheader("🧩 Step 2 — Book data & allocation")
+st.subheader("🧩 Step 2 - Book data & allocation")
 
 confirmed_toc = st.session_state.get("confirmed_toc_text", "") or ""
 
@@ -654,21 +649,20 @@ else:
             st.error("Some sections are still missing allocation. Check your TOC or per-section word counts.")
         else:
             # 5) Costruisce il piano libro
-          plan_preview = BookPlan(
-    title=title or "Title",
-    subtitle=subtitle or "",
-    author=author or "",
-    total_words=total_words,
-    block_size=MAX_SUBGEN_WORDS,
-    chapters=chapters_alloc,
-    language_code=lang_code,
-    tone=tone,
-    brief=brief.strip(),
-    pdf_page=pdf_page,
-    font_name=font_name,
-    chapter_parts=chapter_parts,  # << aggiunto
-)
-
+            plan_preview = BookPlan(
+                title=title or "Title",
+                subtitle=subtitle or "",
+                author=author or "",
+                total_words=total_words,
+                block_size=MAX_SUBGEN_WORDS,
+                chapters=chapters_alloc,
+                language_code=lang_code,
+                tone=tone,
+                brief=brief.strip(),
+                pdf_page=pdf_page,
+                font_name=font_name,
+                chapter_parts=chapter_parts,
+            )
 
             st.session_state.generated_plan = plan_preview
             st.session_state.chapters = chapters_alloc
@@ -698,12 +692,11 @@ else:
         st.info("When satisfied, proceed to Step 3: content generation.")
 
 
-
 # ==========================================
-# ✍️ BLOCK 4 — CONTENT GENERATION & EXPORT
+# ✍️ BLOCK 4 - CONTENT GENERATION & EXPORT
 # ==========================================
 
-st.subheader("🖋️ Step 3 — Content generation & export")
+st.subheader("🖋️ Step 3 - Content generation & export")
 
 # ---------- GENERATION HELPERS ----------
 
@@ -716,8 +709,10 @@ def _effective_language_label(plan: BookPlan) -> str:
 
 def _tone_instruction(tone: str) -> str:
     t = (tone or "").lower()
-    if t.startswith("scien"): return "Use a precise, rigorous, evidence-based tone."
-    if t.startswith("narr"):  return "Use a narrative, evocative tone with smooth transitions."
+    if t.startswith("scien"):
+        return "Use a precise, rigorous, evidence-based tone."
+    if t.startswith("narr"):
+        return "Use a narrative, evocative tone with smooth transitions."
     return "Use a clear, friendly, and practical tone."
 
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
@@ -736,8 +731,14 @@ def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
     except Exception as e:
         return f"[generation error] {e}"
 
-def generate_block_text(plan: BookPlan, ch_title: str, sec_title: str, target_words: int,
-                        prev_summary: str = "", is_last_block: bool = False) -> str:
+def generate_block_text(
+    plan: BookPlan,
+    ch_title: str,
+    sec_title: str,
+    target_words: int,
+    prev_summary: str = "",
+    is_last_block: bool = False
+) -> str:
 
     lang = _effective_language_label(plan)
     tone_ins = _tone_instruction(plan.tone)
@@ -845,14 +846,15 @@ def _add_docx_toc(doc):
     p._p.append(fld)
 
 
-# ---------- DOCX BUILDER (NUOVA VERSIONE COMPLETA) ----------
+# ---------- DOCX BUILDER ----------
+
 def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     doc = Document()
 
     sec = doc.sections[0]
     if plan.pdf_page == "8.5x11":
-        sec.page_width, sec.page_height = Inches(8.5), Inches(11)
         from docx.shared import Cm
+        sec.page_width, sec.page_height = Inches(8.5), Inches(11)
         sec.top_margin = sec.bottom_margin = sec.left_margin = sec.right_margin = Cm(2.54)
     else:
         sec.page_width, sec.page_height = Inches(6), Inches(9)
@@ -966,7 +968,7 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     return out.getvalue()
 
 
-# ---------- PDF BUILDER (NUOVA VERSIONE COMPLETA) ----------
+# ---------- PDF BUILDER ----------
 
 class _TocDocTemplate(SimpleDocTemplate):
     def afterFlowable(self, f):
