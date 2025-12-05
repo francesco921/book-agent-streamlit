@@ -135,7 +135,7 @@ for key, default in {
         st.session_state[key] = default
 
 # ==========================================
-# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL)
+# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL V2)
 # ==========================================
 
 st.subheader("📄 Step 1 - Upload or paste your TOC")
@@ -205,6 +205,75 @@ def _subchapter_word(lang_code: str) -> str:
     return mapping.get(lang_code, "Subchapter")
 
 
+def _infer_lang_from_text(raw: str, detected: str) -> str:
+    """
+    Heuristica semplice:
+    - se il TOC contiene parole chiaramente italiane, forziamo "it"
+    - se contiene spagnolo o francese, forziamo "es"/"fr"
+    altrimenti usiamo detected o en.
+    """
+    raw_l = raw.lower()
+
+    # italiano
+    if any(word in raw_l for word in ["capitolo", "introduzione", "prefazione", "sottocapitolo", "indice"]):
+        return "it"
+
+    # spagnolo
+    if any(word in raw_l for word in ["capítulo", "introducción", "prólogo", "índice"]):
+        return "es"
+
+    # francese
+    if any(word in raw_l for word in ["chapitre", "introduction", "préface", "sommaire"]):
+        return "fr"
+
+    # fallback: use detected if in our set, else en
+    if detected in ["it", "en", "es", "fr"]:
+        return detected
+    return "en"
+
+
+def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
+    """
+    Post-processing dopo il refine:
+    normalizza il prefisso dei sottocapitoli nella lingua corretta, anche se il modello ha mischiato.
+    Esempi input:
+        "Sottocapitolo 1.1 Titolo"
+        "Subchapter 1.1 Title"
+        "Subcapítulo 1.1 Título"
+        "Sous-chapitre 1.1 Titre"
+    Output (se lang_code = it):
+        "SOTTOCAPITOLO 1.1 Titolo"
+    """
+    sub_label = _subchapter_word(lang_code)
+
+    lines_out = []
+    pattern = re.compile(
+        r'^\s*(SOTTOCAPITOLO|Sottocapitolo|Subchapter|Subcap[ií]tulo|Sous-chapitre)\s+'
+        r'(\d+(?:\.\d+)*)\s*(.*)$',
+        flags=re.IGNORECASE,
+    )
+
+    for ln in refined.splitlines():
+        s = ln.strip()
+        if not s:
+            lines_out.append(ln)
+            continue
+
+        m = pattern.match(s)
+        if m:
+            num = m.group(2)
+            rest = m.group(3).strip()
+            if rest:
+                new_line = f"{sub_label} {num} {rest}"
+            else:
+                new_line = f"{sub_label} {num}"
+            lines_out.append(new_line)
+        else:
+            lines_out.append(ln)
+
+    return "\n".join(lines_out)
+
+
 # ------------------------------------------
 # File uploader
 # ------------------------------------------
@@ -224,7 +293,7 @@ if uploaded_file:
         else:
             toc_text = extract_toc_from_txt(uploaded_file)
 
-    # Language detection
+    # Language detection di base
     detected = "auto"
     if toc_text.strip() and HAS_LANGID:
         try:
@@ -232,13 +301,16 @@ if uploaded_file:
         except Exception:
             detected = "auto"
 
-    st.session_state["detected_lang"] = detected
+    # Heuristica aggiuntiva sulla lingua, più robusta
+    lang_code = _infer_lang_from_text(toc_text, detected)
+
+    st.session_state["detected_lang"] = lang_code
     st.session_state["_last_uploaded_name"] = uploaded_file.name
 
     # Update the editable TOC that is bound to the textarea
     st.session_state["toc_text_editable"] = toc_text
 
-    st.success(f"Detected language: **{detected.upper()}**")
+    st.success(f"Detected language: **{lang_code.upper()}**")
 
 
 # ------------------------------------------
@@ -273,9 +345,9 @@ if refine_toc:
     elif not toc_for_refine:
         st.error("TOC is empty. Upload or paste it first.")
     else:
-        lang_code = st.session_state.get("detected_lang", "en")
-        if lang_code not in ["it", "en", "es", "fr"]:
-            lang_code = "en"
+        # lingua base da detected_lang + heuristica sul testo (di nuovo, perché l'utente può aver editato)
+        detected = st.session_state.get("detected_lang", "en")
+        lang_code = _infer_lang_from_text(toc_for_refine, detected)
 
         chap_word = _chapter_word(lang_code)
         sub_word = _subchapter_word(lang_code)
@@ -306,10 +378,14 @@ if refine_toc:
             )
             refined = (resp.choices[0].message.content or "").strip()
 
+        # Normalizzazione etichetta sottocapitolo in base alla lingua
+        refined = _normalize_subchapter_labels(refined, lang_code)
+
         # Non tocchiamo direttamente la chiave del widget in questo rerun.
         # Salviamo in una chiave "pending" e poi facciamo rerun.
         st.session_state["toc_text_pending"] = refined
         st.session_state["confirmed_toc_text"] = refined
+        st.session_state["detected_lang"] = lang_code  # aggiorna lingua effettiva
 
         st.success("TOC refined.")
         st.rerun()
@@ -325,7 +401,6 @@ if confirm_toc:
     else:
         st.session_state["confirmed_toc_text"] = toc_for_confirm
         st.success("TOC confirmed. Proceed to Step 2.")
-
 # ==========================================
 # 🧮 BLOCK 3 - WORD ALLOCATION & 500-WORD BLOCKING
 # ==========================================
