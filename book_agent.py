@@ -59,7 +59,7 @@ MAX_SUBGEN_WORDS = 500           # mai più di 500 parole per singola generazion
 MIN_SECTION_WORDS_USEFUL = 250   # meno di così una sezione non “respira”
 MAX_SECTION_WORDS_SOFT = 1500    # sopra questa soglia segnaliamo “troppo lunga”
 
-# Mappa lingue “umane” → etichette per prompt
+# Mappa lingue “umane” -> etichette per prompt
 LANG_LABELS = {
     "auto": "auto",
     "it": "Italian",
@@ -70,7 +70,7 @@ LANG_LABELS = {
 
 # Formati pagina “da libro” (limitati a 6x9 e 8.5x11 come richiesto)
 PAGE_SIZES = {
-    "6x9": (6 * 72, 9 * 72),           # pollici → punti tipografici
+    "6x9": (6 * 72, 9 * 72),           # pollici -> punti tipografici
     "8.5x11": (8.5 * 72, 11 * 72),
 }
 
@@ -110,15 +110,16 @@ class BookPlan:
     brief: str = ""                      # descrizione breve che guida lo stile
     pdf_page: str = "6x9"                # formato libro
     font_name: str = "Times New Roman"   # font preferito
-    # parte associata a ciascun capitolo (stessa lunghezza di chapters)
     chapter_parts: List[Optional[str]] = field(default_factory=list)
+    # NUOVO: modalità di profondità tecnica
+    technical_depth: bool = False        # se True usa il prompt "Technical Depth Mode"
 
 # ==========================================
 # 🖥️ IMPOSTAZIONI BASE DELLA PAGINA (UI in inglese)
 # ==========================================
 st.set_page_config(page_title="Book Agent - Book Generator", page_icon="📘", layout="wide")
 st.title("📘 Book Agent - Book Generator")
-st.caption("Upload TOC → review/approve → generate → download DOCX/PDF")
+st.caption("Upload TOC -> review/approve -> generate -> download DOCX/PDF")
 
 # Inizializzo “memoria” (serve dopo)
 for key, default in {
@@ -369,7 +370,7 @@ def _parse_allocation_from_title(raw: str):
     - '... (3 blocks)'
 
     Regola:
-    - se contiene 'block|blocks|blocchi|blocco' → blocchi
+    - se contiene 'block|blocks|blocchi|blocco' -> blocchi
     - altrimenti il numero è parole
     """
     text = raw.rstrip()
@@ -416,13 +417,13 @@ def parse_confirmed_toc(toc_text: str):
 
     Ritorna:
     - chapters: List[Chapter]
-    - chapter_parts: List[Optional[str]] → titolo PARTE associato a ogni capitolo
+    - chapter_parts: List[Optional[str]] -> titolo PARTE associato a ogni capitolo
 
     Regole:
     - INTRODUZIONE (senza sottocapitoli) diventa capitolo singolo.
     - PARTE X ... è solo struttura, non generativa.
-    - CAPITOLO X Y → capitolo.
-    - SOTTOCAPITOLO / subchapter / section → sottocapitolo foglia (unità generativa).
+    - CAPITOLO X Y -> capitolo.
+    - SOTTOCAPITOLO / subchapter / section -> sottocapitolo foglia (unità generativa).
     """
     lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
 
@@ -496,8 +497,8 @@ def finalize_allocation_from_toc(chapters: List[Chapter]):
     """
     Normalizza parole/blocchi per ogni sezione foglia:
 
-    - se blocks e non words → words = blocks * MAX_SUBGEN_WORDS
-    - se words e non blocks → blocks = ceil(words / MAX_SUBGEN_WORDS)
+    - se blocks e non words -> words = blocks * MAX_SUBGEN_WORDS
+    - se words e non blocks -> blocks = ceil(words / MAX_SUBGEN_WORDS)
 
     Ritorna:
     - chapters aggiornati
@@ -527,12 +528,11 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
     Ricostruisce un TOC normalizzato nel formato:
 
     TOC
-    INTRODUZIONE [X]          ← H1 singolo (senza parte e senza sottocapitoli reali)
+    INTRODUZIONE [X]          <- H1 singolo (senza parte e senza sottocapitoli reali)
 
-    PARTE 1 I CAZZI           ← H1 contenitore
-    CAPITOLO 1 CIAO           ← H2
-    I CIAO CAZZI [1300]       ← H3 foglia
-    I PEZZI [1500]            ← H3 foglia
+    PARTE 1 ...               <- H1 contenitore
+    CAPITOLO 1 ...            <- H2
+    Sotto A [1300]            <- H3 foglia
     """
     lines = ["TOC"]
     last_part = None
@@ -540,8 +540,7 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
     for ch, part in zip(chapters, chapter_parts):
         ch_title = ch.title.strip()
 
-        # Capitolo "standalone" senza parte e con una sola sezione che ripete il titolo:
-        # es: INTRODUZIONE, PREFACE, ecc.
+        # Capitolo "standalone" senza parte e con una sola sezione che ripete il titolo
         is_intro_like = (
             part is None and
             len(ch.sections) == 1 and
@@ -580,7 +579,7 @@ confirmed_toc = st.session_state.get("confirmed_toc_text", "") or ""
 if not confirmed_toc.strip():
     st.warning("Please confirm the TOC in Step 1 first.")
 else:
-    # 1) Parsing TOC in struttura (PARTE → CAPITOLO → sottocapitoli)
+    # 1) Parsing TOC in struttura (PARTE -> CAPITOLO -> sottocapitoli)
     temp_chapters, chapter_parts = parse_confirmed_toc(confirmed_toc)
 
     all_secs = [sec for ch in temp_chapters for sec in ch.sections]
@@ -601,6 +600,13 @@ else:
 
     TONE_CHOICES_EN = ["Scientific", "Conversational", "Narrative"]
     tone = st.selectbox("Tone of voice", TONE_CHOICES_EN, index=TONE_CHOICES_EN.index("Conversational"))
+
+    # NUOVO: Technical Depth Mode
+    technical_depth = st.checkbox(
+        "Technical Depth Mode (deep mechanisms, pathways, frameworks, pseudo-citations)",
+        value=False,
+        help="When enabled, the model will write with maximum technical depth and mechanistic detail."
+    )
 
     brief = st.text_area(
         "Brief (what the model should optimize for)",
@@ -662,6 +668,7 @@ else:
                 pdf_page=pdf_page,
                 font_name=font_name,
                 chapter_parts=chapter_parts,
+                technical_depth=technical_depth,  # nuovo flag
             )
 
             st.session_state.generated_plan = plan_preview
@@ -675,56 +682,21 @@ else:
 
             st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC has been normalized.")
 
- # 7) Preview allocazione con struttura PARTE → CAPITOLO → SOTTOCAPITOLO
-if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
-    plan: BookPlan = st.session_state.generated_plan
-    chapters_alloc = plan.chapters
-    parts = plan.chapter_parts if plan.chapter_parts else [None] * len(chapters_alloc)
+    # 7) Preview allocazione se presente un piano
+    if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
+        plan: BookPlan = st.session_state.generated_plan
+        chapters_alloc = plan.chapters
 
-    st.markdown("### Allocation preview")
+        st.markdown("### Allocation preview")
+        for i, ch in enumerate(chapters_alloc, start=1):
+            with st.expander(f"Chapter {i}: {ch.title} — {ch.target_words} words — {ch.blocks} total blocks"):
+                for j, sec in enumerate(ch.sections, start=1):
+                    st.write(
+                        f"• Section {j}: {sec.title} — {sec.target_words} words — "
+                        f"{sec.blocks} blocks (≤{MAX_SUBGEN_WORDS} words each)"
+                    )
 
-    last_part = None
-    global_ch_idx = 0
-
-    for ch, part in zip(chapters_alloc, parts):
-        ch_title = ch.title.strip()
-
-        # Capitolo H1 standalone (INTRODUZIONE, PREFACE, ecc.)
-        is_intro_like = (
-            part is None
-            and len(ch.sections) == 1
-            and ch.sections[0].title.strip().lower() == ch_title.lower()
-        )
-
-        if is_intro_like:
-            global_ch_idx += 1
-            sec = ch.sections[0]
-            with st.expander(
-                f"H1: {ch_title} — {sec.target_words} words — {sec.blocks} total blocks"
-            ):
-                st.write(
-                    f"• This is a standalone H1 section (no parts/chapters below). "
-                    f"Text will be generated directly at this level."
-                )
-            continue
-
-        # Se cambia la PARTE, mostra il titolo della PARTE
-        if part and part.strip() and part != last_part:
-            st.markdown(f"**PART / PARTE:** {part.strip()}")
-            last_part = part
-
-        global_ch_idx += 1
-        with st.expander(
-            f"Chapter {global_ch_idx}: {ch_title} — {ch.target_words} words — {ch.blocks} total blocks"
-        ):
-            for j, sec in enumerate(ch.sections, start=1):
-                st.write(
-                    f"• Subchapter {j}: {sec.title} — {sec.target_words} words — "
-                    f"{sec.blocks} blocks (≤{MAX_SUBGEN_WORDS} words each)"
-                )
-
-    st.info("When satisfied, proceed to Step 3: content generation.")
-
+        st.info("When satisfied, proceed to Step 3: content generation.")
 
 
 # ==========================================
@@ -751,16 +723,22 @@ def _tone_instruction(tone: str) -> str:
     return "Use a clear, friendly, and practical tone."
 
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
+    """
+    Singola chiamata al modello OpenAI.
+    Qui decidiamo:
+    - modello
+    - temperatura
+    """
     if not OPENAI_OK:
         return "[No API key configured.]"
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",  # modello più potente per testi professionali
             messages=[
                 {"role": "system", "content": prompt_sys},
                 {"role": "user", "content": prompt_user},
             ],
-            temperature=0.7,
+            temperature=0.6,  # leggermente più basso per maggiore precisione
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
@@ -772,44 +750,114 @@ def generate_block_text(
     sec_title: str,
     target_words: int,
     prev_summary: str = "",
-    is_last_block: bool = False
+    is_last_block: bool = False,
 ) -> str:
+    """
+    Motore generativo professionale.
+    - Se technical_depth = False -> stile avanzato ma generale
+    - Se technical_depth = True  -> "Technical Depth Mode":
+      pathways, modelli, framework, pseudo-citazioni, grafi concettuali descritti a parole.
+    """
 
     lang = _effective_language_label(plan)
     tone_ins = _tone_instruction(plan.tone)
+
     n_sub = max(1, math.ceil(target_words / MAX_SUBGEN_WORDS))
     words_per_sub = min(math.ceil(target_words / n_sub), MAX_SUBGEN_WORDS)
 
-    sys = (
-        "You are an expert non-fiction writer. "
-        f"Write in {lang}. {tone_ins} Avoid repetition. "
-        "Do not restate book/chapter/section titles. "
-        "Write continuous prose (no lists unless necessary)."
+    # SYSTEM PROMPT: base comune
+    base_sys = (
+        "You are a senior-level nonfiction writer and domain expert. "
+        f"Write in {lang}. {tone_ins} "
+        "Maintain logical coherence across the whole book and between consecutive sections. "
+        "Avoid repetition and do not restate book/chapter/section titles. "
+        "Write continuous prose only, no bullet lists, no headings, no markdown. "
     )
 
-    final_chunks = []
-    for idx in range(n_sub):
-        note = "Start naturally." if idx == 0 else "Continue smoothly."
-        if idx == n_sub - 1 and is_last_block:
-            note += " Conclude naturally."
-
-        context = []
-        if plan.brief:
-            context.append(f"Brief: {plan.brief}")
-        if prev_summary:
-            context.append(f"Previous context: {prev_summary}")
-
-        user = (
-            f"Book title: {plan.title}\nSubtitle: {plan.subtitle}\nAuthor: {plan.author}\n"
-            f"Chapter: {ch_title}\nSection: {sec_title}\nTarget: ~{words_per_sub} words\n"
-            f"{note}\n"
-            + ("\n".join(context) if context else "")
+    if plan.technical_depth:
+        # TECHNICAL DEPTH MODE
+        prompt_sys = (
+            base_sys +
+            "Prioritize technical depth, mechanistic explanations and explicit frameworks. "
+            "Introduce and explain molecular pathways, feedback loops, quantitative relationships, "
+            "and formal models whenever relevant. "
+            "Describe conceptual graphs in words (nodes, edges, flows of information or causality). "
+            "Use pseudo-citations and references in a natural language style (e.g., 'as several studies have shown', "
+            "'clinical practice suggests', 'in experimental models', without real DOIs). "
+            "Your style must resemble a high-level professional textbook or research commentary."
+        )
+    else:
+        # Modalità avanzata ma non estremamente tecnica
+        prompt_sys = (
+            base_sys +
+            "Focus on clarity, structure and practical insight. "
+            "Explain principles, mechanisms and implications, but keep the text accessible to a well-educated reader."
         )
 
-        txt = _generate_subchunk(sys, user)
-        final_chunks.append(txt.strip())
+    chunks = []
 
-    return " ".join(final_chunks).strip()
+    for idx in range(n_sub):
+        if idx == 0:
+            position_note = (
+                "Begin the section by clearly framing its core question and scope. "
+                "Connect it explicitly to the chapter context."
+            )
+        else:
+            position_note = (
+                "Continue the section by going deeper: refine mechanisms, add nuance, "
+                "and connect current explanations to what has already been established."
+            )
+
+        if idx == n_sub - 1 and is_last_block:
+            position_note += (
+                " Close the section with a synthetic insight that prepares the reader "
+                "for the next section without anticipating its content explicitly."
+            )
+
+        context_lines = []
+
+        if plan.brief:
+            context_lines.append(
+                "Author brief and constraints (obey strictly): " + plan.brief
+            )
+
+        if prev_summary:
+            context_lines.append(
+                "Summary of previous content in the book (maintain narrative and conceptual continuity): "
+                + prev_summary
+            )
+
+        if plan.technical_depth:
+            depth_instructions = (
+                "In this section, explicitly:\n"
+                "- identify the key variables, agents or components involved,\n"
+                "- describe causal chains and feedback loops between them,\n"
+                "- when possible, map these relations to known models, frameworks or pathways,\n"
+                "- use examples that mirror experimental setups, clinical scenarios, or system-level diagrams."
+            )
+        else:
+            depth_instructions = (
+                "In this section, aim to:\n"
+                "- make the concept intuitively understandable,\n"
+                "- connect it to real-world scenarios,\n"
+                "- show how it fits into the overall logic of the chapter."
+            )
+
+        prompt_user = (
+            f"Book: {plan.title}\n"
+            f"Subtitle: {plan.subtitle}\n"
+            f"Chapter context: {ch_title}\n"
+            f"Current section (focus): {sec_title}\n"
+            f"Target length for this sub-block: approximately {words_per_sub} words.\n\n"
+            f"{position_note}\n\n"
+            f"{depth_instructions}\n\n"
+            + ("\n".join(context_lines) if context_lines else "")
+        )
+
+        txt = _generate_subchunk(prompt_sys, prompt_user)
+        chunks.append(txt.strip())
+
+    return " ".join(chunks).strip()
 
 def generate_all_sections(plan: BookPlan):
     total_blocks = sum(sec.blocks for ch in plan.chapters for sec in ch.sections)
