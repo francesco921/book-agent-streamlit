@@ -42,7 +42,7 @@ try:
 except Exception:
     HAS_LANGID = False
 
-# OpenAI (per scrivere i testi veri, se c’è la chiave)
+# OpenAI (per scrivere i testi veri, se c e la chiave)
 OPENAI_OK = False
 try:
     from openai import OpenAI
@@ -55,11 +55,11 @@ except Exception:
 # ==========================================
 # 🔧 COSTANTI (regole semplici e chiare)
 # ==========================================
-MAX_SUBGEN_WORDS = 500           # mai più di 500 parole per singola generazione
-MIN_SECTION_WORDS_USEFUL = 250   # meno di così una sezione non “respira”
-MAX_SECTION_WORDS_SOFT = 1500    # sopra questa soglia segnaliamo “troppo lunga”
+MAX_SUBGEN_WORDS = 500           # mai piu di 500 parole per singola generazione
+MIN_SECTION_WORDS_USEFUL = 250   # meno di cosi una sezione non respira
+MAX_SECTION_WORDS_SOFT = 1500    # sopra questa soglia segnaliamo troppo lunga
 
-# Mappa lingue “umane” -> etichette per prompt
+# Mappa lingue umane -> etichette per prompt
 LANG_LABELS = {
     "auto": "auto",
     "it": "Italian",
@@ -68,13 +68,13 @@ LANG_LABELS = {
     "fr": "French",
 }
 
-# Formati pagina “da libro” (limitati a 6x9 e 8.5x11 come richiesto)
+# Formati pagina da libro (limitati a 6x9 e 8.5x11 come richiesto)
 PAGE_SIZES = {
     "6x9": (6 * 72, 9 * 72),           # pollici -> punti tipografici
     "8.5x11": (8.5 * 72, 11 * 72),
 }
 
-# Scelte font (DOCX + PDF verranno armonizzate più avanti)
+# Scelte font (DOCX + PDF verranno armonizzate piu avanti)
 FONT_CHOICES = ["Times New Roman", "Roboto", "Comfortaa"]
 
 # Tono di voce (UI inglese usa lista dedicata)
@@ -111,7 +111,7 @@ class BookPlan:
     pdf_page: str = "6x9"                # formato libro
     font_name: str = "Times New Roman"   # font preferito
     chapter_parts: List[Optional[str]] = field(default_factory=list)
-    # NUOVO: modalità di profondità tecnica
+    # NUOVO: modalita di profondita tecnica
     technical_depth: bool = False        # se True usa il prompt "Technical Depth Mode"
 
 # ==========================================
@@ -121,7 +121,7 @@ st.set_page_config(page_title="Book Agent - Book Generator", page_icon="📘", l
 st.title("📘 Book Agent - Book Generator")
 st.caption("Upload TOC -> review/approve -> generate -> download DOCX/PDF")
 
-# Inizializzo “memoria” (serve dopo)
+# Inizializzo memoria (serve dopo)
 for key, default in {
     "chapters": None,
     "allocation_done": False,
@@ -135,7 +135,7 @@ for key, default in {
         st.session_state[key] = default
 
 # ==========================================
-# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL V2)
+# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL V3)
 # ==========================================
 
 st.subheader("📄 Step 1 - Upload or paste your TOC")
@@ -152,11 +152,11 @@ if "detected_lang" not in st.session_state:
 if "_last_uploaded_name" not in st.session_state:
     st.session_state["_last_uploaded_name"] = None
 
-# Se c'è un aggiornamento "pending" dal refine AI, applicalo PRIMA del widget
+# Se esiste un aggiornamento pending (refine o normalize),
+# applicalo prima di creare il widget.
 if "toc_text_pending" in st.session_state:
     st.session_state["toc_text_editable"] = st.session_state["toc_text_pending"]
     del st.session_state["toc_text_pending"]
-
 
 # ------------------------------------------
 # File extraction helpers
@@ -170,7 +170,6 @@ def extract_toc_from_docx(file):
             lines.append(txt)
     return "\n".join(lines)
 
-
 def extract_toc_from_pdf(file):
     reader = PdfReader(file)
     out = []
@@ -183,17 +182,17 @@ def extract_toc_from_pdf(file):
                     out.append(ln)
     return "\n".join(out)
 
-
 def extract_toc_from_txt(file):
     content = file.read().decode("utf-8", errors="ignore")
     lines = [ln for ln in content.splitlines() if ln.strip()]
     return "\n".join(lines)
 
-
+# ------------------------------------------
+# Chapter/Subchapter word per lingua
+# ------------------------------------------
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
-
 
 def _subchapter_word(lang_code: str) -> str:
     mapping = {
@@ -204,59 +203,46 @@ def _subchapter_word(lang_code: str) -> str:
     }
     return mapping.get(lang_code, "Subchapter")
 
-
+# ------------------------------------------
+# Language inference (piu affidabile)
+# ------------------------------------------
 def _infer_lang_from_text(raw: str, detected: str) -> str:
-    """
-    Heuristica semplice:
-    - se il TOC contiene parole chiaramente italiane, forziamo "it"
-    - se contiene spagnolo o francese, forziamo "es"/"fr"
-    altrimenti usiamo detected o en.
-    """
     raw_l = raw.lower()
 
-    # italiano
-    if any(word in raw_l for word in ["capitolo", "introduzione", "prefazione", "sottocapitolo", "indice"]):
+    # Italiano
+    if any(w in raw_l for w in ["capitolo", "introduzione", "prefazione", "sottocapitolo", "indice"]):
         return "it"
 
-    # spagnolo
-    if any(word in raw_l for word in ["capítulo", "introducción", "prólogo", "índice"]):
+    # Spagnolo
+    if any(w in raw_l for w in ["capítulo", "introducción", "prólogo", "índice"]):
         return "es"
 
-    # francese
-    if any(word in raw_l for word in ["chapitre", "introduction", "préface", "sommaire"]):
+    # Francese
+    if any(w in raw_l for w in ["chapitre", "introduction", "préface", "sommaire"]):
         return "fr"
 
-    # fallback: use detected if in our set, else en
+    # Altrimenti usa detected se valido
     if detected in ["it", "en", "es", "fr"]:
         return detected
+
     return "en"
 
-
+# ------------------------------------------
+# Normalizzazione dei sottocapitoli dopo refine
+# ------------------------------------------
 def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
-    """
-    Post-processing dopo il refine:
-    normalizza il prefisso dei sottocapitoli nella lingua corretta, anche se il modello ha mischiato.
-    Esempi input:
-        "Sottocapitolo 1.1 Titolo"
-        "Subchapter 1.1 Title"
-        "Subcapítulo 1.1 Título"
-        "Sous-chapitre 1.1 Titre"
-    Output (se lang_code = it):
-        "SOTTOCAPITOLO 1.1 Titolo"
-    """
     sub_label = _subchapter_word(lang_code)
 
-    lines_out = []
     pattern = re.compile(
-        r'^\s*(SOTTOCAPITOLO|Sottocapitolo|Subchapter|Subcap[ií]tulo|Sous-chapitre)\s+'
-        r'(\d+(?:\.\d+)*)\s*(.*)$',
+        r'^\s*(SOTTOCAPITOLO|Sottocapitolo|Subchapter|Subcap[ií]tulo|Sous-chapitre)\s+(\d+(?:\.\d+)*)\s*(.*)$',
         flags=re.IGNORECASE,
     )
 
+    out = []
     for ln in refined.splitlines():
         s = ln.strip()
         if not s:
-            lines_out.append(ln)
+            out.append(ln)
             continue
 
         m = pattern.match(s)
@@ -264,15 +250,13 @@ def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
             num = m.group(2)
             rest = m.group(3).strip()
             if rest:
-                new_line = f"{sub_label} {num} {rest}"
+                out.append(f"{sub_label} {num} {rest}")
             else:
-                new_line = f"{sub_label} {num}"
-            lines_out.append(new_line)
+                out.append(f"{sub_label} {num}")
         else:
-            lines_out.append(ln)
+            out.append(ln)
 
-    return "\n".join(lines_out)
-
+    return "\n".join(out)
 
 # ------------------------------------------
 # File uploader
@@ -293,7 +277,7 @@ if uploaded_file:
         else:
             toc_text = extract_toc_from_txt(uploaded_file)
 
-    # Language detection di base
+    # Prima lingua da langid, poi raffinata da _infer_lang_from_text
     detected = "auto"
     if toc_text.strip() and HAS_LANGID:
         try:
@@ -301,20 +285,16 @@ if uploaded_file:
         except Exception:
             detected = "auto"
 
-    # Heuristica aggiuntiva sulla lingua, più robusta
     lang_code = _infer_lang_from_text(toc_text, detected)
 
     st.session_state["detected_lang"] = lang_code
     st.session_state["_last_uploaded_name"] = uploaded_file.name
-
-    # Update the editable TOC that is bound to the textarea
     st.session_state["toc_text_editable"] = toc_text
 
     st.success(f"Detected language: **{lang_code.upper()}**")
 
-
 # ------------------------------------------
-# TOC text area (single source of truth)
+# Textarea (single source of truth)
 # ------------------------------------------
 current_toc = st.text_area(
     "Captured / pasted TOC:",
@@ -323,9 +303,8 @@ current_toc = st.text_area(
     help="Paste or edit your TOC here."
 )
 
-
 # ------------------------------------------
-# Buttons (confirm and refine)
+# Buttons
 # ------------------------------------------
 col1, col2 = st.columns(2)
 with col1:
@@ -333,21 +312,19 @@ with col1:
 with col2:
     refine_toc = st.button("🧠 Refine TOC with AI")
 
-
 # ------------------------------------------
 # AI REFINEMENT
 # ------------------------------------------
 if refine_toc:
-    toc_for_refine = st.session_state.get("toc_text_editable", "").strip()
+    toc_raw = st.session_state.get("toc_text_editable", "").strip()
 
     if not OPENAI_OK:
-        st.error("OpenAI API key missing. Cannot refine TOC.")
-    elif not toc_for_refine:
-        st.error("TOC is empty. Upload or paste it first.")
+        st.error("OpenAI API key missing.")
+    elif not toc_raw:
+        st.error("TOC is empty.")
     else:
-        # lingua base da detected_lang + heuristica sul testo (di nuovo, perché l'utente può aver editato)
         detected = st.session_state.get("detected_lang", "en")
-        lang_code = _infer_lang_from_text(toc_for_refine, detected)
+        lang_code = _infer_lang_from_text(toc_raw, detected)
 
         chap_word = _chapter_word(lang_code)
         sub_word = _subchapter_word(lang_code)
@@ -356,15 +333,14 @@ if refine_toc:
             prompt = (
                 "You are a professional non-fiction book editor.\n"
                 "Clean, normalize and structure the following TOC.\n"
-                "STRUCTURING RULES:\n"
-                f"- For main chapters, use the pattern '{chap_word} X' at the beginning of the line.\n"
-                f"- For subchapters or sections, use the pattern '{sub_word} X.Y' at the beginning of the line.\n"
-                "- Use decimal numbering like 1.1, 1.2, 2.1 for subchapters.\n"
-                "- Preserve all original meanings and hierarchy.\n"
-                "- Improve clarity and consistency of titles.\n"
-                "- Do NOT add any explanations or comments.\n"
-                "- Output ONLY the cleaned list, one heading per line.\n\n"
-                f"Original TOC:\n{toc_for_refine}"
+                "RULES:\n"
+                f"- Main chapters: prefix with '{chap_word} X'\n"
+                f"- Subchapters: prefix with '{sub_word} X.Y'\n"
+                "- Use decimal numbering (1.1, 1.2, 2.1, ...)\n"
+                "- Keep all meaning, keep hierarchy\n"
+                "- No commentary, no extra text\n"
+                "- Output ONLY the cleaned list\n\n"
+                f"Original TOC:\n{toc_raw}"
             )
 
             resp = openai_client.chat.completions.create(
@@ -373,34 +349,34 @@ if refine_toc:
                     {"role": "system", "content": "You refine book TOCs."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.4,
+                temperature=0.3,
                 max_tokens=800
             )
+
             refined = (resp.choices[0].message.content or "").strip()
 
-        # Normalizzazione etichetta sottocapitolo in base alla lingua
+        # Normalizza i sottocapitoli nella lingua corretta
         refined = _normalize_subchapter_labels(refined, lang_code)
 
-        # Non tocchiamo direttamente la chiave del widget in questo rerun.
-        # Salviamo in una chiave "pending" e poi facciamo rerun.
+        # Usa pending update per non toccare il widget in questo rerun
         st.session_state["toc_text_pending"] = refined
         st.session_state["confirmed_toc_text"] = refined
-        st.session_state["detected_lang"] = lang_code  # aggiorna lingua effettiva
+        st.session_state["detected_lang"] = lang_code
 
         st.success("TOC refined.")
         st.rerun()
-
 
 # ------------------------------------------
 # Confirm TOC
 # ------------------------------------------
 if confirm_toc:
-    toc_for_confirm = st.session_state.get("toc_text_editable", "").strip()
-    if not toc_for_confirm:
-        st.error("TOC is empty. Paste or upload before confirming.")
+    toc_raw = st.session_state.get("toc_text_editable", "").strip()
+    if not toc_raw:
+        st.error("TOC is empty.")
     else:
-        st.session_state["confirmed_toc_text"] = toc_for_confirm
+        st.session_state["confirmed_toc_text"] = toc_raw
         st.success("TOC confirmed. Proceed to Step 2.")
+
 # ==========================================
 # 🧮 BLOCK 3 - WORD ALLOCATION & 500-WORD BLOCKING
 # ==========================================
@@ -445,7 +421,7 @@ def _is_part_label(ln: str) -> bool:
 
 def _is_chapter_keyword_line(ln: str) -> bool:
     """
-    Riconosce CAPITOLO / CHAPTER solo come parola intera all'inizio
+    Riconosce CAPITOLO / CHAPTER solo come parola intera all inizio
     (non SOTTOCAPITOLO).
     """
     s = ln.strip().lower()
@@ -468,7 +444,7 @@ def _parse_allocation_from_title(raw: str):
 
     Regola:
     - se contiene 'block|blocks|blocchi|blocco' -> blocchi
-    - altrimenti il numero è parole
+    - altrimenti il numero e parole
     """
     text = raw.rstrip()
     words = 0
@@ -520,7 +496,7 @@ def parse_confirmed_toc(toc_text: str):
     - INTRODUZIONE (senza sottocapitoli) diventa capitolo singolo.
     - PARTE X ... è solo struttura, non generativa.
     - CAPITOLO X Y -> capitolo.
-    - SOTTOCAPITOLO / subchapter / section -> sottocapitolo foglia (unità generativa).
+    - SOTTOCAPITOLO / subchapter / section -> sottocapitolo foglia (unita generativa).
     """
     lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
 
@@ -583,7 +559,7 @@ def parse_confirmed_toc(toc_text: str):
         current_chapter.sections.append(sec)
 
     # safety: se un capitolo non ha sottocapitoli espliciti,
-    # il capitolo stesso è l'unità generativa
+    # il capitolo stesso e l unita generativa
     for ch in chapters:
         if not ch.sections:
             ch.sections.append(Section(title=ch.title))
@@ -637,7 +613,7 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
     for ch, part in zip(chapters, chapter_parts):
         ch_title = ch.title.strip()
 
-        # Capitolo "standalone" senza parte e con una sola sezione che ripete il titolo
+        # Capitolo standalone senza parte e con una sola sezione che ripete il titolo
         is_intro_like = (
             part is None and
             len(ch.sections) == 1 and
@@ -665,7 +641,6 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
             lines.append(f"{sec_title} [{sec.target_words}]")
 
     return "\n".join(lines).strip()
-
 
 # ---------- UI STEP 2 ----------
 
@@ -739,45 +714,48 @@ else:
 
         submitted_meta = st.form_submit_button("Save book data & compute allocation")
 
-    if submitted_meta:
-        # assegna parole alle sezioni mancanti
-        for sec, v in missing_specs:
-            sec.target_words = int(v)
-            sec.blocks = max(1, math.ceil(sec.target_words / MAX_SUBGEN_WORDS))
+        if submitted_meta:
+            # assegna parole alle sezioni mancanti
+            for sec, v in missing_specs:
+                sec.target_words = int(v)
+                sec.blocks = max(1, math.ceil(sec.target_words / MAX_SUBGEN_WORDS))
 
-        # 4) Finalizza allocazione
-        chapters_alloc, total_words, missing_after = finalize_allocation_from_toc(temp_chapters)
+            # 4) Finalizza allocazione
+            chapters_alloc, total_words, missing_after = finalize_allocation_from_toc(temp_chapters)
 
-        if missing_after:
-            st.error("Some sections are still missing allocation. Check your TOC or per-section word counts.")
-        else:
-            # 5) Costruisce il piano libro
-            plan_preview = BookPlan(
-                title=title or "Title",
-                subtitle=subtitle or "",
-                author=author or "",
-                total_words=total_words,
-                block_size=MAX_SUBGEN_WORDS,
-                chapters=chapters_alloc,
-                language_code=lang_code,
-                tone=tone,
-                brief=brief.strip(),
-                pdf_page=pdf_page,
-                font_name=font_name,
-                chapter_parts=chapter_parts,
-                technical_depth=technical_depth,  # nuovo flag
-            )
+            if missing_after:
+                st.error("Some sections are still missing allocation. Check your TOC or per-section word counts.")
+            else:
+                # 5) Costruisce il piano libro
+                plan_preview = BookPlan(
+                    title=title or "Title",
+                    subtitle=subtitle or "",
+                    author=author or "",
+                    total_words=total_words,
+                    block_size=MAX_SUBGEN_WORDS,
+                    chapters=chapters_alloc,
+                    language_code=lang_code,
+                    tone=tone,
+                    brief=brief.strip(),
+                    pdf_page=pdf_page,
+                    font_name=font_name,
+                    chapter_parts=chapter_parts,
+                    technical_depth=technical_depth,  # nuovo flag
+                )
 
-            st.session_state.generated_plan = plan_preview
-            st.session_state.chapters = chapters_alloc
-            st.session_state.allocation_done = True
+                st.session_state.generated_plan = plan_preview
+                st.session_state.chapters = chapters_alloc
+                st.session_state.allocation_done = True
 
-            # 6) TOC normalizzato nello stato logico (verrà mostrato in Step 1 al prossimo rerun)
-            new_toc = rebuild_toc_from_plan(chapters_alloc, chapter_parts)
-            st.session_state["toc_text_editable"] = new_toc
-            st.session_state["confirmed_toc_text"] = new_toc
+                # Normalizza TOC
+                new_toc = rebuild_toc_from_plan(chapters_alloc, chapter_parts)
 
-            st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC has been normalized.")
+                # NON scrivere "toc_text_editable" direttamente in questo rerun
+                st.session_state["toc_text_pending"] = new_toc
+                st.session_state["confirmed_toc_text"] = new_toc
+
+                st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC normalized.")
+                st.rerun()
 
     # 7) Preview allocazione se presente un piano
     if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
@@ -786,15 +764,14 @@ else:
 
         st.markdown("### Allocation preview")
         for i, ch in enumerate(chapters_alloc, start=1):
-            with st.expander(f"Chapter {i}: {ch.title} — {ch.target_words} words — {ch.blocks} total blocks"):
+            with st.expander(f"Chapter {i}: {ch.title} - {ch.target_words} words - {ch.blocks} total blocks"):
                 for j, sec in enumerate(ch.sections, start=1):
                     st.write(
-                        f"• Section {j}: {sec.title} — {sec.target_words} words — "
+                        f"• Section {j}: {sec.title} - {sec.target_words} words - "
                         f"{sec.blocks} blocks (≤{MAX_SUBGEN_WORDS} words each)"
                     )
 
         st.info("When satisfied, proceed to Step 3: content generation.")
-
 
 # ==========================================
 # ✍️ BLOCK 4 - CONTENT GENERATION & EXPORT
@@ -830,12 +807,12 @@ def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
         return "[No API key configured.]"
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4o",  # modello più potente per testi professionali
+            model="gpt-4o",  # modello piu potente per testi professionali
             messages=[
                 {"role": "system", "content": prompt_sys},
                 {"role": "user", "content": prompt_user},
             ],
-            temperature=0.6,  # leggermente più basso per maggiore precisione
+            temperature=0.6,  # leggermente piu basso per maggiore precisione
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
@@ -852,7 +829,7 @@ def generate_block_text(
     """
     Motore generativo professionale.
     - Se technical_depth = False -> stile avanzato ma generale
-    - Se technical_depth = True  -> "Technical Depth Mode":
+    - Se technical_depth = True  -> Technical Depth Mode:
       pathways, modelli, framework, pseudo-citazioni, grafi concettuali descritti a parole.
     """
 
@@ -884,7 +861,7 @@ def generate_block_text(
             "Your style must resemble a high-level professional textbook or research commentary."
         )
     else:
-        # Modalità avanzata ma non estremamente tecnica
+        # Modalita avanzata ma non estremamente tecnica
         prompt_sys = (
             base_sys +
             "Focus on clarity, structure and practical insight. "
@@ -995,7 +972,6 @@ def generate_all_sections(plan: BookPlan):
     bar.empty()
     st.success("✅ Content generation completed.")
 
-
 # ---------- EXPORT HELPERS ----------
 
 PDF_FONT_MAP = {
@@ -1024,7 +1000,6 @@ def _add_docx_toc(doc):
     fld = OxmlElement("w:fldSimple")
     fld.set(_qn("w:instr"), r'TOC \o "1-3" \h \z \u')
     p._p.append(fld)
-
 
 # ---------- DOCX BUILDER ----------
 
@@ -1147,7 +1122,6 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     doc.save(out)
     return out.getvalue()
 
-
 # ---------- PDF BUILDER ----------
 
 class _TocDocTemplate(SimpleDocTemplate):
@@ -1254,8 +1228,8 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     doc.build(story)
     return buf.getvalue()
 
-
 # ---------- UI BUTTONS ----------
+
 if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
     plan: BookPlan = st.session_state.generated_plan
 
