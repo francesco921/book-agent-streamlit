@@ -134,9 +134,8 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-
 # ==========================================
-# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FIXED)
+# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL)
 # ==========================================
 
 st.subheader("📄 Step 1 - Upload or paste your TOC")
@@ -194,6 +193,16 @@ def extract_toc_from_txt(file):
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
+
+
+def _subchapter_word(lang_code: str) -> str:
+    mapping = {
+        "it": "SOTTOCAPITOLO",
+        "en": "Subchapter",
+        "es": "Subcapítulo",
+        "fr": "Sous-chapitre",
+    }
+    return mapping.get(lang_code, "Subchapter")
 
 
 # ------------------------------------------
@@ -267,17 +276,22 @@ if refine_toc:
         lang_code = st.session_state.get("detected_lang", "en")
         if lang_code not in ["it", "en", "es", "fr"]:
             lang_code = "en"
+
         chap_word = _chapter_word(lang_code)
+        sub_word = _subchapter_word(lang_code)
 
         with st.spinner("Refining TOC..."):
             prompt = (
                 "You are a professional non-fiction book editor.\n"
-                "Clean, normalize and structure the following TOC:\n"
-                f"- Use '{chap_word} X' for chapters\n"
-                "- Use numbering like 1.1, 1.2 for subsections\n"
-                "- Keep all meaning\n"
-                "- Improve clarity\n"
-                "- Output ONLY the cleaned list, one line per heading\n\n"
+                "Clean, normalize and structure the following TOC.\n"
+                "STRUCTURING RULES:\n"
+                f"- For main chapters, use the pattern '{chap_word} X' at the beginning of the line.\n"
+                f"- For subchapters or sections, use the pattern '{sub_word} X.Y' at the beginning of the line.\n"
+                "- Use decimal numbering like 1.1, 1.2, 2.1 for subchapters.\n"
+                "- Preserve all original meanings and hierarchy.\n"
+                "- Improve clarity and consistency of titles.\n"
+                "- Do NOT add any explanations or comments.\n"
+                "- Output ONLY the cleaned list, one heading per line.\n\n"
                 f"Original TOC:\n{toc_for_refine}"
             )
 
@@ -292,8 +306,8 @@ if refine_toc:
             )
             refined = (resp.choices[0].message.content or "").strip()
 
-        # NON tocchi direttamente la chiave del widget.
-        # Salvi in una chiave "pending" e fai rerun.
+        # Non tocchiamo direttamente la chiave del widget in questo rerun.
+        # Salviamo in una chiave "pending" e poi facciamo rerun.
         st.session_state["toc_text_pending"] = refined
         st.session_state["confirmed_toc_text"] = refined
 
@@ -311,7 +325,6 @@ if confirm_toc:
     else:
         st.session_state["confirmed_toc_text"] = toc_for_confirm
         st.success("TOC confirmed. Proceed to Step 2.")
-
 
 # ==========================================
 # 🧮 BLOCK 3 - WORD ALLOCATION & 500-WORD BLOCKING
