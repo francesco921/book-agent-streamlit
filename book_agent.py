@@ -675,21 +675,56 @@ else:
 
             st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC has been normalized.")
 
-    # 7) Preview allocazione se presente un piano
-    if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
-        plan: BookPlan = st.session_state.generated_plan
-        chapters_alloc = plan.chapters
+ # 7) Preview allocazione con struttura PARTE → CAPITOLO → SOTTOCAPITOLO
+if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
+    plan: BookPlan = st.session_state.generated_plan
+    chapters_alloc = plan.chapters
+    parts = plan.chapter_parts if plan.chapter_parts else [None] * len(chapters_alloc)
 
-        st.markdown("### Allocation preview")
-        for i, ch in enumerate(chapters_alloc, start=1):
-            with st.expander(f"Chapter {i}: {ch.title} — {ch.target_words} words — {ch.blocks} total blocks"):
-                for j, sec in enumerate(ch.sections, start=1):
-                    st.write(
-                        f"• Section {j}: {sec.title} — {sec.target_words} words — "
-                        f"{sec.blocks} blocks (≤{MAX_SUBGEN_WORDS} words each)"
-                    )
+    st.markdown("### Allocation preview")
 
-        st.info("When satisfied, proceed to Step 3: content generation.")
+    last_part = None
+    global_ch_idx = 0
+
+    for ch, part in zip(chapters_alloc, parts):
+        ch_title = ch.title.strip()
+
+        # Capitolo H1 standalone (INTRODUZIONE, PREFACE, ecc.)
+        is_intro_like = (
+            part is None
+            and len(ch.sections) == 1
+            and ch.sections[0].title.strip().lower() == ch_title.lower()
+        )
+
+        if is_intro_like:
+            global_ch_idx += 1
+            sec = ch.sections[0]
+            with st.expander(
+                f"H1: {ch_title} — {sec.target_words} words — {sec.blocks} total blocks"
+            ):
+                st.write(
+                    f"• This is a standalone H1 section (no parts/chapters below). "
+                    f"Text will be generated directly at this level."
+                )
+            continue
+
+        # Se cambia la PARTE, mostra il titolo della PARTE
+        if part and part.strip() and part != last_part:
+            st.markdown(f"**PART / PARTE:** {part.strip()}")
+            last_part = part
+
+        global_ch_idx += 1
+        with st.expander(
+            f"Chapter {global_ch_idx}: {ch_title} — {ch.target_words} words — {ch.blocks} total blocks"
+        ):
+            for j, sec in enumerate(ch.sections, start=1):
+                st.write(
+                    f"• Subchapter {j}: {sec.title} — {sec.target_words} words — "
+                    f"{sec.blocks} blocks (≤{MAX_SUBGEN_WORDS} words each)"
+                )
+
+    st.info("When satisfied, proceed to Step 3: content generation.")
+
 
 
 # ==========================================
