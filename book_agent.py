@@ -136,13 +136,13 @@ for key, default in {
 
 
 # ==========================================
-# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL FIXED VERSION)
+# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FIXED)
 # ==========================================
 
 st.subheader("📄 Step 1 - Upload or paste your TOC")
 
 # ------------------------------------------
-# Apply pending TOC (if any)
+# Session state initialization for TOC
 # ------------------------------------------
 if "toc_text_editable" not in st.session_state:
     st.session_state["toc_text_editable"] = ""
@@ -155,13 +155,8 @@ if "_last_uploaded_name" not in st.session_state:
 
 
 # ------------------------------------------
-# File uploader
+# File extraction helpers
 # ------------------------------------------
-uploaded_file = st.file_uploader(
-    "Upload TOC (DOCX, PDF or TXT) - optional",
-    type=["docx", "pdf", "txt"]
-)
-
 def extract_toc_from_docx(file):
     doc = Document(file)
     lines = []
@@ -170,6 +165,7 @@ def extract_toc_from_docx(file):
         if txt and not txt.isdigit() and len(txt) > 2:
             lines.append(txt)
     return "\n".join(lines)
+
 
 def extract_toc_from_pdf(file):
     reader = PdfReader(file)
@@ -183,17 +179,26 @@ def extract_toc_from_pdf(file):
                     out.append(ln)
     return "\n".join(out)
 
+
 def extract_toc_from_txt(file):
     content = file.read().decode("utf-8", errors="ignore")
     lines = [ln for ln in content.splitlines() if ln.strip()]
     return "\n".join(lines)
+
 
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
 
 
-# Se l'utente carica un file
+# ------------------------------------------
+# File uploader
+# ------------------------------------------
+uploaded_file = st.file_uploader(
+    "Upload TOC (DOCX, PDF or TXT) - optional",
+    type=["docx", "pdf", "txt"]
+)
+
 if uploaded_file:
     fname = uploaded_file.name.lower()
 
@@ -205,44 +210,36 @@ if uploaded_file:
         else:
             toc_text = extract_toc_from_txt(uploaded_file)
 
+    # Language detection
     detected = "auto"
     if toc_text.strip() and HAS_LANGID:
         try:
             detected = langid.classify(toc_text[:500])[0]
-        except:
+        except Exception:
             detected = "auto"
 
     st.session_state["detected_lang"] = detected
+    st.session_state["_last_uploaded_name"] = uploaded_file.name
 
-    # Aggiorna text_edit SOLO se è un file nuovo
-    if st.session_state["_last_uploaded_name"] != uploaded_file.name:
-        st.session_state["toc_text_editable"] = toc_text
-        st.session_state["_last_uploaded_name"] = uploaded_file.name
+    # Update the editable TOC that is bound to the textarea
+    st.session_state["toc_text_editable"] = toc_text
 
     st.success(f"Detected language: **{detected.upper()}**")
 
 
 # ------------------------------------------
-# TEXT AREA DEL TOC (stabile)
+# TOC text area (single source of truth)
 # ------------------------------------------
-
-current_toc = st.session_state["toc_text_editable"]
-
-new_toc = st.text_area(
+current_toc = st.text_area(
     "Captured / pasted TOC:",
-    value=current_toc,
-    key="toc_input",
+    key="toc_text_editable",
     height=330,
     help="Paste or edit your TOC here."
 )
 
-if new_toc != current_toc:
-    st.session_state["toc_text_editable"] = new_toc
-    current_toc = new_toc
-
 
 # ------------------------------------------
-# Bottoni
+# Buttons (confirm and refine)
 # ------------------------------------------
 col1, col2 = st.columns(2)
 with col1:
@@ -255,13 +252,17 @@ with col2:
 # AI REFINEMENT
 # ------------------------------------------
 if refine_toc:
+    toc_for_refine = st.session_state.get("toc_text_editable", "").strip()
+
     if not OPENAI_OK:
         st.error("OpenAI API key missing. Cannot refine TOC.")
-    elif not current_toc.strip():
+    elif not toc_for_refine:
         st.error("TOC is empty. Upload or paste it first.")
     else:
         lang_code = st.session_state.get("detected_lang", "en")
-        chap_word = _chapter_word(lang_code if lang_code in ["it", "en", "es", "fr"] else "en")
+        if lang_code not in ["it", "en", "es", "fr"]:
+            lang_code = "en"
+        chap_word = _chapter_word(lang_code)
 
         with st.spinner("Refining TOC..."):
             prompt = (
@@ -272,7 +273,7 @@ if refine_toc:
                 "- Keep all meaning\n"
                 "- Improve clarity\n"
                 "- Output ONLY the cleaned list, one line per heading\n\n"
-                f"Original TOC:\n{current_toc}"
+                f"Original TOC:\n{toc_for_refine}"
             )
 
             resp = openai_client.chat.completions.create(
@@ -286,6 +287,7 @@ if refine_toc:
             )
             refined = (resp.choices[0].message.content or "").strip()
 
+        # Update both the editable TOC and the confirmed snapshot
         st.session_state["toc_text_editable"] = refined
         st.session_state["confirmed_toc_text"] = refined
 
@@ -294,13 +296,14 @@ if refine_toc:
 
 
 # ------------------------------------------
-# Conferma TOC
+# Confirm TOC
 # ------------------------------------------
 if confirm_toc:
-    if not current_toc.strip():
+    toc_for_confirm = st.session_state.get("toc_text_editable", "").strip()
+    if not toc_for_confirm:
         st.error("TOC is empty. Paste or upload before confirming.")
     else:
-        st.session_state["confirmed_toc_text"] = current_toc
+        st.session_state["confirmed_toc_text"] = toc_for_confirm
         st.success("TOC confirmed. Proceed to Step 2.")
 
 
