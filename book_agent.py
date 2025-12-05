@@ -1,5 +1,5 @@
 # ==========================================
-# 🧠 COSA FA (spiegato semplice)
+# COSA FA (spiegato semplice)
 # ------------------------------------------
 # Questo programma crea un libro a partire dal tuo TOC:
 # - carichi il TOC
@@ -10,7 +10,7 @@
 # ==========================================
 
 # ==========================================
-# 📦 IMPORT: prendo gli attrezzi che servono
+# IMPORT: prendo gli attrezzi che servono
 # ==========================================
 import io
 import os
@@ -27,7 +27,7 @@ from docx.oxml.ns import qn
 from PyPDF2 import PdfReader
 
 # PDF (per impaginare il libro)
-from reportlab.lib.pagesizes import A4, letter  # (non usati in UI, ma safe to keep)
+from reportlab.lib.pagesizes import A4, letter  # non usati in UI, ma safe to keep
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.platypus.tableofcontents import TableOfContents
@@ -53,7 +53,7 @@ except Exception:
     OPENAI_OK = False
 
 # ==========================================
-# 🔧 COSTANTI (regole semplici e chiare)
+# COSTANTI (regole semplici e chiare)
 # ==========================================
 MAX_SUBGEN_WORDS = 500           # mai piu di 500 parole per singola generazione
 MIN_SECTION_WORDS_USEFUL = 250   # meno di cosi una sezione non respira
@@ -77,18 +77,15 @@ PAGE_SIZES = {
 # Scelte font (DOCX + PDF verranno armonizzate piu avanti)
 FONT_CHOICES = ["Times New Roman", "Roboto", "Comfortaa"]
 
-# Tono di voce (UI inglese usa lista dedicata)
-TONE_CHOICES = ["Scientifico", "Colloquiale", "Narrativo"]
-
 # ==========================================
-# 🧱 SCATOLE DOVE METTO I DATI (modelli)
+# SCATOLE DOVE METTO I DATI (modelli)
 # ==========================================
 @dataclass
 class Section:
     title: str
     target_words: int = 0
     blocks: int = 0
-    texts: List[str] = field(default_factory=list)  # testi finali dei sottoblocchi (concatenati a vista)
+    texts: List[str] = field(default_factory=list)  # testi finali dei sottoblocchi
 
 @dataclass
 class Chapter:
@@ -105,23 +102,27 @@ class BookPlan:
     total_words: int
     block_size: int
     chapters: List[Chapter] = field(default_factory=list)
-    language_code: str = "auto"          # "auto", "it", "en", ...
+    language_code: str = "auto"          # "auto", "it", "en", "es", "fr"
     tone: str = "Conversational"         # UI inglese
     brief: str = ""                      # descrizione breve che guida lo stile
     pdf_page: str = "6x9"                # formato libro
     font_name: str = "Times New Roman"   # font preferito
     chapter_parts: List[Optional[str]] = field(default_factory=list)
-    # NUOVO: modalita di profondita tecnica
-    technical_depth: bool = False        # se True usa il prompt "Technical Depth Mode"
+    # Modalita di profondita tecnica specifica
+    technical_depth: bool = False
+    # Nuove impostazioni di stile selezionabili dall utente
+    writing_mode: str = "Professional Manual"   # General / Introductory, Professional Manual, Expert / Technical
+    direct_style: bool = True                   # niente domande, niente intro generiche
+    strict_focus: bool = True                   # aderire strettamente al topic
 
 # ==========================================
-# 🖥️ IMPOSTAZIONI BASE DELLA PAGINA (UI in inglese)
+# IMPOSTAZIONI BASE DELLA PAGINA (UI in inglese)
 # ==========================================
 st.set_page_config(page_title="Book Agent - Book Generator", page_icon="📘", layout="wide")
 st.title("📘 Book Agent - Book Generator")
 st.caption("Upload TOC -> review/approve -> generate -> download DOCX/PDF")
 
-# Inizializzo memoria (serve dopo)
+# Inizializzo memoria
 for key, default in {
     "chapters": None,
     "allocation_done": False,
@@ -135,14 +136,12 @@ for key, default in {
         st.session_state[key] = default
 
 # ==========================================
-# 📂 BLOCK 2 - TOC UPLOAD AND REVIEW (FINAL V3)
+# BLOCK 2 - TOC UPLOAD AND REVIEW
 # ==========================================
 
-st.subheader("📄 Step 1 - Upload or paste your TOC")
+st.subheader("Step 1 - Upload or paste your TOC")
 
-# ------------------------------------------
 # Session state initialization for TOC
-# ------------------------------------------
 if "toc_text_editable" not in st.session_state:
     st.session_state["toc_text_editable"] = ""
 
@@ -152,15 +151,12 @@ if "detected_lang" not in st.session_state:
 if "_last_uploaded_name" not in st.session_state:
     st.session_state["_last_uploaded_name"] = None
 
-# Se esiste un aggiornamento pending (refine o normalize),
-# applicalo prima di creare il widget.
+# Applica eventuale pending update
 if "toc_text_pending" in st.session_state:
     st.session_state["toc_text_editable"] = st.session_state["toc_text_pending"]
     del st.session_state["toc_text_pending"]
 
-# ------------------------------------------
 # File extraction helpers
-# ------------------------------------------
 def extract_toc_from_docx(file):
     doc = Document(file)
     lines = []
@@ -187,9 +183,7 @@ def extract_toc_from_txt(file):
     lines = [ln for ln in content.splitlines() if ln.strip()]
     return "\n".join(lines)
 
-# ------------------------------------------
 # Chapter/Subchapter word per lingua
-# ------------------------------------------
 def _chapter_word(lang_code: str) -> str:
     mapping = {"it": "Capitolo", "en": "Chapter", "es": "Capítulo", "fr": "Chapitre"}
     return mapping.get(lang_code, "Chapter")
@@ -203,33 +197,21 @@ def _subchapter_word(lang_code: str) -> str:
     }
     return mapping.get(lang_code, "Subchapter")
 
-# ------------------------------------------
-# Language inference (piu affidabile)
-# ------------------------------------------
+# Language inference
 def _infer_lang_from_text(raw: str, detected: str) -> str:
     raw_l = raw.lower()
 
-    # Italiano
     if any(w in raw_l for w in ["capitolo", "introduzione", "prefazione", "sottocapitolo", "indice"]):
         return "it"
-
-    # Spagnolo
     if any(w in raw_l for w in ["capítulo", "introducción", "prólogo", "índice"]):
         return "es"
-
-    # Francese
     if any(w in raw_l for w in ["chapitre", "introduction", "préface", "sommaire"]):
         return "fr"
-
-    # Altrimenti usa detected se valido
     if detected in ["it", "en", "es", "fr"]:
         return detected
-
     return "en"
 
-# ------------------------------------------
 # Normalizzazione dei sottocapitoli dopo refine
-# ------------------------------------------
 def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
     sub_label = _subchapter_word(lang_code)
 
@@ -258,9 +240,7 @@ def _normalize_subchapter_labels(refined: str, lang_code: str) -> str:
 
     return "\n".join(out)
 
-# ------------------------------------------
 # File uploader
-# ------------------------------------------
 uploaded_file = st.file_uploader(
     "Upload TOC (DOCX, PDF or TXT) - optional",
     type=["docx", "pdf", "txt"]
@@ -277,7 +257,6 @@ if uploaded_file:
         else:
             toc_text = extract_toc_from_txt(uploaded_file)
 
-    # Prima lingua da langid, poi raffinata da _infer_lang_from_text
     detected = "auto"
     if toc_text.strip() and HAS_LANGID:
         try:
@@ -291,11 +270,9 @@ if uploaded_file:
     st.session_state["_last_uploaded_name"] = uploaded_file.name
     st.session_state["toc_text_editable"] = toc_text
 
-    st.success(f"Detected language: **{lang_code.upper()}**")
+    st.success(f"Detected language: {lang_code.upper()}")
 
-# ------------------------------------------
-# Textarea (single source of truth)
-# ------------------------------------------
+# Textarea TOC
 current_toc = st.text_area(
     "Captured / pasted TOC:",
     key="toc_text_editable",
@@ -303,18 +280,14 @@ current_toc = st.text_area(
     help="Paste or edit your TOC here."
 )
 
-# ------------------------------------------
 # Buttons
-# ------------------------------------------
 col1, col2 = st.columns(2)
 with col1:
-    confirm_toc = st.button("✅ Confirm this TOC")
+    confirm_toc = st.button("Confirm this TOC")
 with col2:
-    refine_toc = st.button("🧠 Refine TOC with AI")
+    refine_toc = st.button("Refine TOC with AI")
 
-# ------------------------------------------
 # AI REFINEMENT
-# ------------------------------------------
 if refine_toc:
     toc_raw = st.session_state.get("toc_text_editable", "").strip()
 
@@ -355,10 +328,8 @@ if refine_toc:
 
             refined = (resp.choices[0].message.content or "").strip()
 
-        # Normalizza i sottocapitoli nella lingua corretta
         refined = _normalize_subchapter_labels(refined, lang_code)
 
-        # Usa pending update per non toccare il widget in questo rerun
         st.session_state["toc_text_pending"] = refined
         st.session_state["confirmed_toc_text"] = refined
         st.session_state["detected_lang"] = lang_code
@@ -366,9 +337,7 @@ if refine_toc:
         st.success("TOC refined.")
         st.rerun()
 
-# ------------------------------------------
 # Confirm TOC
-# ------------------------------------------
 if confirm_toc:
     toc_raw = st.session_state.get("toc_text_editable", "").strip()
     if not toc_raw:
@@ -378,26 +347,14 @@ if confirm_toc:
         st.success("TOC confirmed. Proceed to Step 2.")
 
 # ==========================================
-# 🧮 BLOCK 3 - WORD ALLOCATION & 500-WORD BLOCKING
+# BLOCK 3 - WORD ALLOCATION & 500-WORD BLOCKING
 # ==========================================
 
-# ---------- PARSING HELPERS ----------
-
 def _strip_leading_markers(s: str) -> str:
-    """
-    Pulisce il titolo:
-    - bullet iniziali
-    - numeri (1., 1.1, 1.1.1, 1) ecc.
-    - prefissi tipo 'SOTTOCAPITOLO', 'Subchapter', 'Section' + numero.
-    """
     s = s.strip()
-    # bullet
     s = re.sub(r"^[\-\*\u2022]+\s*", "", s)
-    # numerazioni tipo 1., 1.1, 1.1.1
     s = re.sub(r"^\d+(?:\.\d+){0,3}[\.\)\-:]?\s*", "", s)
-    # forme tipo ".1 "
     s = re.sub(r"^\.\d+\s*", "", s)
-    # prefissi testuali di sottocapitolo / sezione
     s = re.sub(
         r"^(sottocapitolo|sottcapitolo|sotto capitolo|subchapter|sub-chapter|section)\s*\d*\s*[:\-\.\)]*\s*",
         "",
@@ -407,7 +364,6 @@ def _strip_leading_markers(s: str) -> str:
     return s.strip()
 
 def _is_toc_label(ln: str) -> bool:
-    """Riconosce TOC / INDEX / INDICE ecc. da ignorare come contenuto."""
     s = ln.strip().lower()
     return (
         s in {"toc", "t.o.c.", "index", "indice", "table of contents"} or
@@ -415,15 +371,10 @@ def _is_toc_label(ln: str) -> bool:
     )
 
 def _is_part_label(ln: str) -> bool:
-    """Riconosce PART / PARTE (livello strutturale, non generativo)."""
     s = ln.strip().lower()
     return bool(re.match(r"^(part|parte|partie)\b", s))
 
 def _is_chapter_keyword_line(ln: str) -> bool:
-    """
-    Riconosce CAPITOLO / CHAPTER solo come parola intera all inizio
-    (non SOTTOCAPITOLO).
-    """
     s = ln.strip().lower()
     if re.match(r"^(chapter|capitolo)\b", s):
         return True
@@ -432,20 +383,6 @@ def _is_chapter_keyword_line(ln: str) -> bool:
     return False
 
 def _parse_allocation_from_title(raw: str):
-    """
-    Estrae titolo + parole/blocchi dalla fine della riga.
-
-    Formati supportati:
-    - '... [800]'
-    - '... [800 words]'
-    - '... [800 parole]'
-    - '... (2 blocchi)'
-    - '... (3 blocks)'
-
-    Regola:
-    - se contiene 'block|blocks|blocchi|blocco' -> blocchi
-    - altrimenti il numero e parole
-    """
     text = raw.rstrip()
     words = 0
     blocks = 0
@@ -465,15 +402,10 @@ def _parse_allocation_from_title(raw: str):
     return text.strip(), words, blocks
 
 def _looks_like_chapter_without_keyword(ln: str) -> bool:
-    """
-    Euristica per capitoli senza parola 'Chapter/Capitolo'.
-    NON deve riconoscere sottocapitoli (contengono 'sott', 'sub', 'section').
-    """
     s = ln.strip().lower()
 
     if "sott" in s or "sub" in s or "section" in s:
         return False
-
     if len(ln.split()) > 12:
         return False
     if not ln[:1].isalpha():
@@ -485,19 +417,6 @@ def _looks_like_chapter_without_keyword(ln: str) -> bool:
     return True
 
 def parse_confirmed_toc(toc_text: str):
-    """
-    Parsing del TOC confermato.
-
-    Ritorna:
-    - chapters: List[Chapter]
-    - chapter_parts: List[Optional[str]] -> titolo PARTE associato a ogni capitolo
-
-    Regole:
-    - INTRODUZIONE (senza sottocapitoli) diventa capitolo singolo.
-    - PARTE X ... è solo struttura, non generativa.
-    - CAPITOLO X Y -> capitolo.
-    - SOTTOCAPITOLO / subchapter / section -> sottocapitolo foglia (unita generativa).
-    """
     lines = [ln.rstrip() for ln in toc_text.splitlines() if ln.strip()]
 
     chapters: List[Chapter] = []
@@ -512,16 +431,13 @@ def parse_confirmed_toc(toc_text: str):
         if not ln:
             continue
 
-        # TOC / Indice
         if _is_toc_label(ln):
             continue
 
-        # PARTE / PART
         if _is_part_label(ln):
             current_part = ln.strip()
             continue
 
-        # CAPITOLO esplicito
         if _is_chapter_keyword_line(ln):
             chap_idx += 1
             title_clean, _, _ = _parse_allocation_from_title(ln)
@@ -531,7 +447,6 @@ def parse_confirmed_toc(toc_text: str):
             chapter_parts.append(current_part)
             continue
 
-        # CAPITOLO euristico (es. "INTRODUZIONE", "PREFACE", ecc.)
         if current_chapter is None:
             if _looks_like_chapter_without_keyword(ln):
                 chap_idx += 1
@@ -542,13 +457,11 @@ def parse_confirmed_toc(toc_text: str):
                 chapter_parts.append(current_part)
                 continue
             else:
-                # fallback: capitolo generico
                 chap_idx += 1
                 current_chapter = Chapter(title=f"Chapter {chap_idx}")
                 chapters.append(current_chapter)
                 chapter_parts.append(current_part)
 
-        # Tutto il resto = sottocapitolo foglia
         title_clean, words, blocks = _parse_allocation_from_title(ln)
         title_clean = _strip_leading_markers(title_clean)
 
@@ -558,8 +471,6 @@ def parse_confirmed_toc(toc_text: str):
         sec = Section(title=title_clean, target_words=words, blocks=blocks)
         current_chapter.sections.append(sec)
 
-    # safety: se un capitolo non ha sottocapitoli espliciti,
-    # il capitolo stesso e l unita generativa
     for ch in chapters:
         if not ch.sections:
             ch.sections.append(Section(title=ch.title))
@@ -567,17 +478,6 @@ def parse_confirmed_toc(toc_text: str):
     return chapters, chapter_parts
 
 def finalize_allocation_from_toc(chapters: List[Chapter]):
-    """
-    Normalizza parole/blocchi per ogni sezione foglia:
-
-    - se blocks e non words -> words = blocks * MAX_SUBGEN_WORDS
-    - se words e non blocks -> blocks = ceil(words / MAX_SUBGEN_WORDS)
-
-    Ritorna:
-    - chapters aggiornati
-    - total_words
-    - lista delle sezioni ancora senza allocazione
-    """
     all_secs: List[Section] = [sec for ch in chapters for sec in ch.sections]
 
     for sec in all_secs:
@@ -597,23 +497,12 @@ def finalize_allocation_from_toc(chapters: List[Chapter]):
     return chapters, total_words, missing
 
 def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[str]]) -> str:
-    """
-    Ricostruisce un TOC normalizzato nel formato:
-
-    TOC
-    INTRODUZIONE [X]          <- H1 singolo (senza parte e senza sottocapitoli reali)
-
-    PARTE 1 ...               <- H1 contenitore
-    CAPITOLO 1 ...            <- H2
-    Sotto A [1300]            <- H3 foglia
-    """
     lines = ["TOC"]
     last_part = None
 
     for ch, part in zip(chapters, chapter_parts):
         ch_title = ch.title.strip()
 
-        # Capitolo standalone senza parte e con una sola sezione che ripete il titolo
         is_intro_like = (
             part is None and
             len(ch.sections) == 1 and
@@ -623,42 +512,37 @@ def rebuild_toc_from_plan(chapters: List[Chapter], chapter_parts: List[Optional[
         if is_intro_like:
             sec = ch.sections[0]
             lines.append(f"{ch_title} [{sec.target_words}]")
-            lines.append("")  # riga vuota per separare blocchi nel TOC
+            lines.append("")
             continue
 
-        # Usa PARTE come livello H1 contenitore, se presente
         if part and part != last_part:
             lines.append(part.strip())
             last_part = part
 
-        # CAPITOLO (H2), senza allocazione (solo struttura)
         if ch_title:
             lines.append(ch_title)
 
-        # SOTTOCAPITOLI: le vere foglie con allocazione
         for sec in ch.sections:
             sec_title = sec.title.strip()
             lines.append(f"{sec_title} [{sec.target_words}]")
 
     return "\n".join(lines).strip()
 
-# ---------- UI STEP 2 ----------
+# UI STEP 2
 
-st.subheader("🧩 Step 2 - Book data & allocation")
+st.subheader("Step 2 - Book data & allocation")
 
 confirmed_toc = st.session_state.get("confirmed_toc_text", "") or ""
 
 if not confirmed_toc.strip():
     st.warning("Please confirm the TOC in Step 1 first.")
 else:
-    # 1) Parsing TOC in struttura (PARTE -> CAPITOLO -> sottocapitoli)
     temp_chapters, chapter_parts = parse_confirmed_toc(confirmed_toc)
 
     all_secs = [sec for ch in temp_chapters for sec in ch.sections]
     missing_initial = [s for s in all_secs if s.target_words <= 0 and s.blocks <= 0]
     needs_per_section_input = len(missing_initial) > 0
 
-    # 2) Parametri generali di generazione
     lang_code = st.selectbox(
         "Generation language",
         ["auto", "it", "en", "es", "fr"],
@@ -673,11 +557,30 @@ else:
     TONE_CHOICES_EN = ["Scientific", "Conversational", "Narrative"]
     tone = st.selectbox("Tone of voice", TONE_CHOICES_EN, index=TONE_CHOICES_EN.index("Conversational"))
 
-    # NUOVO: Technical Depth Mode
     technical_depth = st.checkbox(
-        "Technical Depth Mode (deep mechanisms, pathways, frameworks, pseudo-citations)",
+        "Technical Depth Mode (deep mechanisms, frameworks, pseudo-citations)",
         value=False,
         help="When enabled, the model will write with maximum technical depth and mechanistic detail."
+    )
+
+    # Nuove opzioni selezionabili dall utente
+    writing_mode = st.selectbox(
+        "Writing mode",
+        ["General / Introductory", "Professional Manual", "Expert / Technical"],
+        index=1,
+        help="Choose the overall depth and style of the content."
+    )
+
+    direct_style = st.checkbox(
+        "Direct style (no questions, no generic intros)",
+        value=True,
+        help="When enabled, sections start directly with the core idea. No rhetorical questions or generic introductions."
+    )
+
+    strict_focus = st.checkbox(
+        "Strict topic focus",
+        value=True,
+        help="Keep the text strictly aligned with the section title and chapter context. No abstract digressions."
     )
 
     brief = st.text_area(
@@ -689,7 +592,7 @@ else:
     pdf_page = st.selectbox("Page size", ["6x9", "8.5x11"], index=0)
     font_name = st.selectbox("Primary font", FONT_CHOICES, index=0)
 
-    # 3) Metadati libro + parole per sezioni senza allocazione
+    # Metadati libro + parole mancanti
     missing_specs = []
 
     with st.form("book_info_form"):
@@ -715,18 +618,15 @@ else:
         submitted_meta = st.form_submit_button("Save book data & compute allocation")
 
         if submitted_meta:
-            # assegna parole alle sezioni mancanti
             for sec, v in missing_specs:
                 sec.target_words = int(v)
                 sec.blocks = max(1, math.ceil(sec.target_words / MAX_SUBGEN_WORDS))
 
-            # 4) Finalizza allocazione
             chapters_alloc, total_words, missing_after = finalize_allocation_from_toc(temp_chapters)
 
             if missing_after:
                 st.error("Some sections are still missing allocation. Check your TOC or per-section word counts.")
             else:
-                # 5) Costruisce il piano libro
                 plan_preview = BookPlan(
                     title=title or "Title",
                     subtitle=subtitle or "",
@@ -740,24 +640,24 @@ else:
                     pdf_page=pdf_page,
                     font_name=font_name,
                     chapter_parts=chapter_parts,
-                    technical_depth=technical_depth,  # nuovo flag
+                    technical_depth=technical_depth,
+                    writing_mode=writing_mode,
+                    direct_style=direct_style,
+                    strict_focus=strict_focus,
                 )
 
                 st.session_state.generated_plan = plan_preview
                 st.session_state.chapters = chapters_alloc
                 st.session_state.allocation_done = True
 
-                # Normalizza TOC
                 new_toc = rebuild_toc_from_plan(chapters_alloc, chapter_parts)
 
-                # NON scrivere "toc_text_editable" direttamente in questo rerun
                 st.session_state["toc_text_pending"] = new_toc
                 st.session_state["confirmed_toc_text"] = new_toc
 
-                st.success(f"✅ Allocation ready. Total words: ~{total_words}. TOC normalized.")
+                st.success(f"Allocation ready. Total words: ~{total_words}. TOC normalized.")
                 st.rerun()
 
-    # 7) Preview allocazione se presente un piano
     if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
         plan: BookPlan = st.session_state.generated_plan
         chapters_alloc = plan.chapters
@@ -774,12 +674,10 @@ else:
         st.info("When satisfied, proceed to Step 3: content generation.")
 
 # ==========================================
-# ✍️ BLOCK 4 - CONTENT GENERATION & EXPORT
+# BLOCK 4 - CONTENT GENERATION & EXPORT
 # ==========================================
 
-st.subheader("🖋️ Step 3 - Content generation & export")
-
-# ---------- GENERATION HELPERS ----------
+st.subheader("Step 3 - Content generation & export")
 
 def _effective_language_label(plan: BookPlan) -> str:
     code = plan.language_code
@@ -797,22 +695,16 @@ def _tone_instruction(tone: str) -> str:
     return "Use a clear, friendly, and practical tone."
 
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
-    """
-    Singola chiamata al modello OpenAI.
-    Qui decidiamo:
-    - modello
-    - temperatura
-    """
     if not OPENAI_OK:
         return "[No API key configured.]"
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4o",  # modello piu potente per testi professionali
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": prompt_sys},
                 {"role": "user", "content": prompt_user},
             ],
-            temperature=0.6,  # leggermente piu basso per maggiore precisione
+            temperature=0.6,
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
@@ -826,66 +718,86 @@ def generate_block_text(
     prev_summary: str = "",
     is_last_block: bool = False,
 ) -> str:
-    """
-    Motore generativo professionale.
-    - Se technical_depth = False -> stile avanzato ma generale
-    - Se technical_depth = True  -> Technical Depth Mode:
-      pathways, modelli, framework, pseudo-citazioni, grafi concettuali descritti a parole.
-    """
-
     lang = _effective_language_label(plan)
     tone_ins = _tone_instruction(plan.tone)
 
     n_sub = max(1, math.ceil(target_words / MAX_SUBGEN_WORDS))
     words_per_sub = min(math.ceil(target_words / n_sub), MAX_SUBGEN_WORDS)
 
-    # SYSTEM PROMPT: base comune
     base_sys = (
         "You are a senior-level nonfiction writer and domain expert. "
         f"Write in {lang}. {tone_ins} "
         "Maintain logical coherence across the whole book and between consecutive sections. "
-        "Avoid repetition and do not restate book/chapter/section titles. "
-        "Write continuous prose only, no bullet lists, no headings, no markdown. "
+        "Avoid repetition and do not restate book, chapter or section titles. "
+        "Write continuous prose only, no bullet lists, no headings, no markdown."
+    )
+
+    focus_clause = ""
+    if plan.strict_focus:
+        focus_clause = (
+            " Stay strictly on-topic based on the section title and chapter context. "
+            "Avoid philosophical digressions, perception theory, abstract metaphors or content outside the domain implied by the book and section."
+        )
+
+    mode = (plan.writing_mode or "Professional Manual").lower()
+    if "general" in mode:
+        depth_instructions = (
+            "Explain concepts in a simple and accessible way, with limited technical detail. "
+            "Use clear language and focus on understanding rather than exhaustive coverage."
+        )
+    elif "expert" in mode:
+        depth_instructions = (
+            "Write with maximum depth and precision. Include mechanisms, interdependencies, models and advanced insights. "
+            "Avoid generic statements and soft language. Every paragraph should add substantial information."
+        )
+    else:
+        depth_instructions = (
+            "Deliver high-density content with clear logic, domain-specific terminology and practical implications. "
+            "Avoid fluff, motivational language and generic summaries."
+        )
+
+    anti_fluff_clause = (
+        " Avoid filler, padding and meta-comments. "
+        "Do not use transitional phrases such as 'in the next chapter', 'this leads us to', 'in summary', "
+        "'we have seen that' or similar. End each sub-block cleanly without announcing what comes next."
     )
 
     if plan.technical_depth:
-        # TECHNICAL DEPTH MODE
-        prompt_sys = (
-            base_sys +
-            "Prioritize technical depth, mechanistic explanations and explicit frameworks. "
-            "Introduce and explain molecular pathways, feedback loops, quantitative relationships, "
-            "and formal models whenever relevant. "
-            "Describe conceptual graphs in words (nodes, edges, flows of information or causality). "
-            "Use pseudo-citations and references in a natural language style (e.g., 'as several studies have shown', "
-            "'clinical practice suggests', 'in experimental models', without real DOIs). "
-            "Your style must resemble a high-level professional textbook or research commentary."
+        tech_clause = (
+            " Prioritize technical depth, mechanistic explanations and explicit frameworks whenever appropriate. "
+            "When relevant, describe variables, agents or components, causal chains, feedback loops and rate-limiting factors. "
+            "Use pseudo-citations in natural language style such as 'clinical practice suggests', 'in experimental models', "
+            "without real article titles or DOIs."
         )
     else:
-        # Modalita avanzata ma non estremamente tecnica
-        prompt_sys = (
-            base_sys +
-            "Focus on clarity, structure and practical insight. "
-            "Explain principles, mechanisms and implications, but keep the text accessible to a well-educated reader."
-        )
+        tech_clause = ""
+
+    prompt_sys = base_sys + focus_clause + " " + depth_instructions + tech_clause + anti_fluff_clause
 
     chunks = []
 
     for idx in range(n_sub):
-        if idx == 0:
-            position_note = (
-                "Begin the section by clearly framing its core question and scope. "
-                "Connect it explicitly to the chapter context."
-            )
+        if plan.direct_style:
+            if idx == 0:
+                position_note = (
+                    "Begin with a clear, direct statement that introduces the core idea of this section. "
+                    "Do not use rhetorical questions. Do not start with 'What is', 'Why' or 'How'. "
+                    "Do not use storytelling, imaginary scenarios or metaphors in the opening."
+                )
+            else:
+                position_note = (
+                    "Continue by increasing depth and nuance using direct statements. "
+                    "Avoid rhetorical questions and avoid reintroducing the topic from scratch."
+                )
         else:
-            position_note = (
-                "Continue the section by going deeper: refine mechanisms, add nuance, "
-                "and connect current explanations to what has already been established."
-            )
+            if idx == 0:
+                position_note = "You may use a short contextual introduction before getting into the core idea."
+            else:
+                position_note = "Continue the section, keeping the content coherent with what you already wrote."
 
         if idx == n_sub - 1 and is_last_block:
             position_note += (
-                " Close the section with a synthetic insight that prepares the reader "
-                "for the next section without anticipating its content explicitly."
+                " Close this section with a clear final point, without summarizing previous sections and without announcing the next chapter."
             )
 
         context_lines = []
@@ -901,22 +813,6 @@ def generate_block_text(
                 + prev_summary
             )
 
-        if plan.technical_depth:
-            depth_instructions = (
-                "In this section, explicitly:\n"
-                "- identify the key variables, agents or components involved,\n"
-                "- describe causal chains and feedback loops between them,\n"
-                "- when possible, map these relations to known models, frameworks or pathways,\n"
-                "- use examples that mirror experimental setups, clinical scenarios, or system-level diagrams."
-            )
-        else:
-            depth_instructions = (
-                "In this section, aim to:\n"
-                "- make the concept intuitively understandable,\n"
-                "- connect it to real-world scenarios,\n"
-                "- show how it fits into the overall logic of the chapter."
-            )
-
         prompt_user = (
             f"Book: {plan.title}\n"
             f"Subtitle: {plan.subtitle}\n"
@@ -924,7 +820,6 @@ def generate_block_text(
             f"Current section (focus): {sec_title}\n"
             f"Target length for this sub-block: approximately {words_per_sub} words.\n\n"
             f"{position_note}\n\n"
-            f"{depth_instructions}\n\n"
             + ("\n".join(context_lines) if context_lines else "")
         )
 
@@ -970,9 +865,9 @@ def generate_all_sections(plan: BookPlan):
                 bar.progress(done / total_blocks, text=f"Blocks completed: {done}/{total_blocks}")
 
     bar.empty()
-    st.success("✅ Content generation completed.")
+    st.success("Content generation completed.")
 
-# ---------- EXPORT HELPERS ----------
+# EXPORT HELPERS
 
 PDF_FONT_MAP = {
     "Times New Roman": "Times-Roman",
@@ -985,7 +880,6 @@ def _safe_filename(plan: BookPlan) -> str:
     base = re.sub(r"[^\w\-]+", "_", base).strip("_")
     return re.sub(r"_+", "_", base) or "book"
 
-# TOC Word
 def _add_docx_toc(doc):
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _qn
@@ -1001,8 +895,6 @@ def _add_docx_toc(doc):
     fld.set(_qn("w:instr"), r'TOC \o "1-3" \h \z \u')
     p._p.append(fld)
 
-# ---------- DOCX BUILDER ----------
-
 def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> bytes:
     doc = Document()
 
@@ -1014,7 +906,6 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     else:
         sec.page_width, sec.page_height = Inches(6), Inches(9)
 
-    # Title page
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run(plan.title)
@@ -1037,7 +928,6 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
 
     doc.add_page_break()
 
-    # Copyright
     if include_copyright:
         p = doc.add_paragraph("Copyright & Disclaimer")
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1054,12 +944,10 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
         para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         doc.add_page_break()
 
-    # TOC
     if include_toc:
         _add_docx_toc(doc)
         doc.add_page_break()
 
-    # Font
     style = doc.styles["Normal"]
     style.font.name = plan.font_name
     try:
@@ -1071,11 +959,9 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     parts = plan.chapter_parts if plan.chapter_parts else [None] * len(chapters)
     last_part = None
 
-    # Main content
     for ch, part in zip(chapters, parts):
         ch_title = ch.title.strip()
 
-        # INTRODUZIONE / PREFACE (H1 diretto)
         is_intro_like = (
             part is None
             and len(ch.sections) == 1
@@ -1094,18 +980,15 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
             doc.add_page_break()
             continue
 
-        # Parte (H1)
         if part and part != last_part:
             p = doc.add_paragraph(part.strip())
             p.style = doc.styles["Heading 1"]
             last_part = part
 
-        # Capitolo (H2)
         if ch_title:
             p = doc.add_paragraph(ch_title)
             p.style = doc.styles["Heading 2"]
 
-        # Sottocapitoli (H3)
         for sec_leaf in ch.sections:
             sec_title = sec_leaf.title.strip()
             if sec_title.lower() != ch_title.lower():
@@ -1121,8 +1004,6 @@ def build_docx(plan: BookPlan, include_toc=True, include_copyright=False) -> byt
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
-
-# ---------- PDF BUILDER ----------
 
 class _TocDocTemplate(SimpleDocTemplate):
     def afterFlowable(self, f):
@@ -1151,13 +1032,11 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
 
     story = []
 
-    # Title page
     story += [Spacer(1, 40), Paragraph(plan.title, TitleC)]
     if plan.subtitle.strip():
         story.append(Paragraph(plan.subtitle, SubC))
     story += [Spacer(1, pagesize[1] * 0.55), Paragraph(plan.author, SubC), PageBreak()]
 
-    # Copyright
     if include_copyright:
         story += [
             Paragraph("Copyright & Disclaimer", H1),
@@ -1173,7 +1052,6 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
             PageBreak(),
         ]
 
-    # TOC
     if include_toc:
         toc = TableOfContents()
         toc.levelStyles = [
@@ -1190,7 +1068,6 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     for ch, part in zip(chapters, parts):
         ch_title = ch.title.strip()
 
-        # INTRODUZIONE / PREFACE
         is_intro_like = (
             part is None
             and len(ch.sections) == 1
@@ -1228,7 +1105,7 @@ def build_pdf(plan: BookPlan, include_toc=True, include_copyright=False) -> byte
     doc.build(story)
     return buf.getvalue()
 
-# ---------- UI BUTTONS ----------
+# UI BUTTONS FINAL
 
 if st.session_state.get("allocation_done") and st.session_state.get("generated_plan"):
     plan: BookPlan = st.session_state.generated_plan
@@ -1239,7 +1116,7 @@ if st.session_state.get("allocation_done") and st.session_state.get("generated_p
     with c2:
         opt_copyright = st.checkbox("Include Copyright & Disclaimer page", value=False)
 
-    if st.button("🚀 CONFIRM AND GENERATE CONTENT", type="primary", use_container_width=True):
+    if st.button("CONFIRM AND GENERATE CONTENT", type="primary", use_container_width=True):
         generate_all_sections(plan)
         try:
             st.session_state["docx_bytes"] = build_docx(plan, include_toc=opt_toc, include_copyright=opt_copyright)
@@ -1248,7 +1125,7 @@ if st.session_state.get("allocation_done") and st.session_state.get("generated_p
             st.error(f"Export error: {e}")
 
     if st.session_state.get("docx_bytes") and st.session_state.get("pdf_bytes"):
-        st.subheader("📥 Download your book")
+        st.subheader("Download your book")
         fname = _safe_filename(plan)
 
         c1, c2 = st.columns(2)
