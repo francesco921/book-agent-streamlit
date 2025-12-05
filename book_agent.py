@@ -86,6 +86,8 @@ class Section:
     target_words: int = 0
     blocks: int = 0
     texts: List[str] = field(default_factory=list)  # testi finali dei sottoblocchi
+    # micro-outline interno, uno slot per blocco
+    subtopics: List[str] = field(default_factory=list)
 
 @dataclass
 class Chapter:
@@ -691,6 +693,72 @@ def _tone_instruction(tone: str) -> str:
         return "Use a narrative, evocative tone with smooth transitions."
     return "Use a clear, friendly, and practical tone."
 
+# Pianificazione dei subtopic per le sezioni multi-blocco
+def plan_section_subtopics(plan: BookPlan):
+    """
+    Per ogni sezione con blocks > 1, chiede al modello un micro-outline interno:
+    - esattamente `blocks` subtopic
+    - uno per ciascun blocco
+    """
+    if not OPENAI_OK:
+        return
+
+    lang = _effective_language_label(plan)
+
+    for ch in plan.chapters:
+        for sec in ch.sections:
+            if sec.blocks <= 1:
+                continue  # non serve outline interno
+
+            try:
+                prompt_sys = "You design internal outlines for high-level nonfiction sections."
+
+                prompt_user = (
+                    f"You are planning the internal structure of a nonfiction book section in {lang}.\n"
+                    f"Book: {plan.title}\n"
+                    f"Chapter: {ch.title}\n"
+                    f"Section title: {sec.title}\n"
+                    f"The section will be written in {sec.blocks} consecutive prose blocks, each about {plan.block_size} words.\n\n"
+                    "TASK:\n"
+                    f"- Propose exactly {sec.blocks} distinct and non-overlapping subtopics.\n"
+                    "- Each subtopic should cover a specific angle, mechanism, use-case or layer of the section topic.\n"
+                    "- Order the subtopics so that they flow logically from fundamentals to applications or consequences.\n"
+                    "- Output format: one line per subtopic, numbered '1.', '2.', ... with a short, concrete description.\n"
+                    "- No extra commentary, no introductions, no conclusions."
+                )
+
+                resp = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": prompt_sys},
+                        {"role": "user", "content": prompt_user},
+                    ],
+                    temperature=0.3,
+                    max_tokens=400,
+                )
+
+                raw = (resp.choices[0].message.content or "").strip()
+                lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+                subtopics: List[str] = []
+                for ln in lines:
+                    ln = re.sub(r"^\d+[\.\)]\s*", "", ln).strip()
+                    if ln:
+                        subtopics.append(ln)
+
+                if not subtopics:
+                    sec.subtopics = []
+                else:
+                    if len(subtopics) >= sec.blocks:
+                        sec.subtopics = subtopics[: sec.blocks]
+                    else:
+                        while len(subtopics) < sec.blocks:
+                            subtopics.append(subtopics[-1])
+                        sec.subtopics = subtopics
+
+            except Exception:
+                sec.subtopics = []
+
 def _generate_subchunk(prompt_sys: str, prompt_user: str) -> str:
     if not OPENAI_OK:
         return "[No API key configured.]"
@@ -714,7 +782,9 @@ def generate_block_text(
     target_words: int,
     prev_summary: str = "",
     is_last_block: bool = False,
-    forbidden_openings: Optional[List[str]] = None,  # lista di aperture gia usate nel capitolo
+    forbidden_openings: Optional[List[str]] = None,
+    section_history: str = "",
+    subtopic: str = "",
 ) -> str:
     lang = _effective_language_label(plan)
     tone_ins = _tone_instruction(plan.tone)
@@ -725,8 +795,10 @@ def generate_block_text(
     base_sys = (
         "You are a senior-level nonfiction writer and domain expert. "
         f"Write in {lang}. {tone_ins} "
-        "Maintain logical coherence across the whole book and between consecutive sections. "
-        "Avoid repetition and do not restate book, chapter or section titles. "
+        "Maintain strict logical coherence with the rest of the book and the current chapter. "
+        "Assume the reader has already read all previous blocks. "
+        "Never redefine or re-explain the same core ideas inside the same chapter. "
+        "Each new block must add non-overlapping information compared to what has already been written. "
         "Write continuous prose only, no bullet lists, no headings, no markdown. "
         "Vary your sentence openings and syntactic structures across sections so they are not mechanically similar."
     )
@@ -735,24 +807,25 @@ def generate_block_text(
     if plan.strict_focus:
         focus_clause = (
             " Stay strictly on-topic based on the section title and chapter context. "
-            "Avoid philosophical digressions, perception theory, abstract metaphors or content outside the domain implied by the book and section."
+            "Do not introduce philosophical digressions, generic motivational content or abstract metaphors "
+            "that are not directly useful to the topic."
         )
 
     mode = (plan.writing_mode or "Professional Manual").lower()
     if "general" in mode:
         depth_instructions = (
-            "Explain concepts in a simple and accessible way, with limited technical detail. "
-            "Use clear language and focus on understanding rather than exhaustive coverage."
+            "Explain concepts in a clear and accessible way, with limited technical detail. "
+            "Prioritize understanding and clarity over exhaustive coverage."
         )
     elif "expert" in mode:
         depth_instructions = (
             "Write with maximum depth and precision. Include mechanisms, interdependencies, models and advanced insights. "
-            "Avoid generic statements and soft language. Every paragraph should add substantial information."
+            "Avoid generic statements and soft language. Each paragraph must add substantial, high-value information."
         )
     else:
         depth_instructions = (
             "Deliver high-density content with clear logic, domain-specific terminology and practical implications. "
-            "Avoid fluff, motivational language and generic summaries."
+            "Avoid fluff, motivational tone and generic summaries."
         )
 
     anti_fluff_clause = (
@@ -763,15 +836,14 @@ def generate_block_text(
 
     if plan.technical_depth:
         tech_clause = (
-            " When appropriate, prioritize technical depth, mechanistic explanations and explicit frameworks. "
-            "Describe variables, agents or components, causal chains, feedback loops and rate-limiting factors when relevant. "
+            " When relevant, prioritize technical depth, mechanistic explanations and explicit frameworks. "
+            "Describe variables, components, causal chains, feedback loops and rate-limiting factors when appropriate."
         )
     else:
         tech_clause = ""
 
     forbidden_clause = ""
     if forbidden_openings:
-        # prendiamo solo le ultime N per non appesantire troppo
         last_openings = forbidden_openings[-12:]
         joined = "\n".join(f"- {op}" for op in last_openings)
         forbidden_clause = (
@@ -779,6 +851,26 @@ def generate_block_text(
             f"{joined}\n"
             "Do NOT start this section with a sentence whose structure, rhythm or semantic framing closely resembles any of them. "
             "Use a new syntactic pattern and a distinct way of entering into the topic."
+        )
+
+    repetition_guard = ""
+    if section_history:
+        repetition_guard = (
+            " Below you will see excerpts of what has already been written in THIS section. "
+            "Use them ONLY as context to avoid repetition. "
+            "Do NOT summarize them, do NOT rephrase them, and do NOT restate any definition or mechanism that is already present there. "
+            "Your job is to extend the section with new, complementary material."
+        )
+
+    subtopic_clause = ""
+    if subtopic:
+        subtopic_clause = (
+            f" For this block, focus specifically on the following angle of the section topic: {subtopic} "
+            "Stay within this angle and do not drift back to aspects that belong to other blocks."
+        )
+    else:
+        subtopic_clause = (
+            " For this block, focus on a single clear angle or subtopic of the section instead of giving a generic overview."
         )
 
     prompt_sys = (
@@ -790,6 +882,8 @@ def generate_block_text(
         + anti_fluff_clause
         + " "
         + forbidden_clause
+        + " "
+        + repetition_guard
     )
 
     chunks = []
@@ -798,7 +892,7 @@ def generate_block_text(
         if plan.direct_style:
             if idx == 0:
                 position_note = (
-                    "Begin with a clear, direct statement that introduces the core idea of this section. "
+                    "Begin with a clear, direct statement that dives immediately into the substance of this block. "
                     "Do not use rhetorical questions. Do not start with 'What is', 'Why' or 'How'. "
                     "Do not use storytelling, imaginary scenarios or metaphors in the opening."
                 )
@@ -810,17 +904,17 @@ def generate_block_text(
         else:
             if idx == 0:
                 position_note = (
-                    "You may use a short contextual introduction before getting into the core idea, "
-                    "but keep it concise and relevant."
+                    "You may use a short contextual lead-in, but keep it concise and immediately relevant to the core idea."
                 )
             else:
                 position_note = (
-                    "Continue the section, keeping the content coherent with what you already wrote."
+                    "Continue the section, staying tightly connected to what has already been written."
                 )
 
         if idx == n_sub - 1 and is_last_block:
             position_note += (
-                " Close this section with a clear final point, without summarizing previous sections and without announcing the next chapter."
+                " Close this section with a clear final point related to this block's angle, "
+                "without summarizing previous sections and without announcing the next chapter."
             )
 
         context_lines = []
@@ -832,9 +926,18 @@ def generate_block_text(
 
         if prev_summary:
             context_lines.append(
-                "Summary of previous content in the book (maintain narrative and conceptual continuity): "
+                "Summary of previous content in the book (keep high-level continuity): "
                 + prev_summary
             )
+
+        if section_history:
+            context_lines.append(
+                "Content already written in this section (use ONLY to avoid repetition, never to restate it): "
+                + section_history
+            )
+
+        if subtopic_clause:
+            context_lines.append(subtopic_clause)
 
         prompt_user = (
             f"Book: {plan.title}\n"
@@ -857,6 +960,9 @@ def generate_all_sections(plan: BookPlan):
         st.warning("No blocks to generate. Check your allocation.")
         return
 
+    # Pianifica il micro-outline interno per le sezioni multi-blocco
+    plan_section_subtopics(plan)
+
     bar = st.progress(0, text="Writing in progress...")
     done = 0
     prev_summary = ""
@@ -871,6 +977,22 @@ def generate_all_sections(plan: BookPlan):
             block_target = max(1, math.ceil(sec.target_words / max(1, sec.blocks)))
 
             for b in range(sec.blocks):
+                # Memoria specifica della sezione: testo gia scritto in questa sezione
+                if b == 0:
+                    section_history = ""
+                else:
+                    already = " ".join(sec.texts)
+                    words_hist = re.split(r"\s+", already)
+                    if len(words_hist) > 350:
+                        section_history = " ".join(words_hist[-350:])
+                    else:
+                        section_history = already
+
+                # Subtopic dedicato a questo blocco (se pianificato)
+                current_subtopic = ""
+                if sec.subtopics and b < len(sec.subtopics):
+                    current_subtopic = sec.subtopics[b]
+
                 # Per il primo sub-blocco della sezione usiamo le aperture vietate
                 forbidden = used_openings if b == 0 else None
 
@@ -882,10 +1004,12 @@ def generate_all_sections(plan: BookPlan):
                     prev_summary=prev_summary,
                     is_last_block=(b == sec.blocks - 1),
                     forbidden_openings=forbidden,
+                    section_history=section_history,
+                    subtopic=current_subtopic,
                 )
                 sec.texts.append(text)
 
-                # Aggiorna prev_summary per la continuita
+                # Aggiorna prev_summary per la continuita globale del libro
                 words = re.split(r"\s+", text.strip())
                 if len(words) > 120:
                     prev_summary = " ".join(words[:60]) + " ... " + " ".join(words[-40:])
@@ -898,7 +1022,6 @@ def generate_all_sections(plan: BookPlan):
                     opening_snippet = " ".join(opening_words[:10]).lower()
                     if opening_snippet and opening_snippet not in used_openings:
                         used_openings.append(opening_snippet)
-                    # opzionale: limita la lunghezza della lista
                     if len(used_openings) > 40:
                         used_openings = used_openings[-40:]
 
