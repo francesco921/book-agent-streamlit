@@ -153,6 +153,11 @@ if "detected_lang" not in st.session_state:
 if "_last_uploaded_name" not in st.session_state:
     st.session_state["_last_uploaded_name"] = None
 
+# Se c'è un aggiornamento "pending" dal refine AI, applicalo PRIMA del widget
+if "toc_text_pending" in st.session_state:
+    st.session_state["toc_text_editable"] = st.session_state["toc_text_pending"]
+    del st.session_state["toc_text_pending"]
+
 
 # ------------------------------------------
 # File extraction helpers
@@ -287,8 +292,9 @@ if refine_toc:
             )
             refined = (resp.choices[0].message.content or "").strip()
 
-        # Update both the editable TOC and the confirmed snapshot
-        st.session_state["toc_text_editable"] = refined
+        # NON tocchi direttamente la chiave del widget.
+        # Salvi in una chiave "pending" e fai rerun.
+        st.session_state["toc_text_pending"] = refined
         st.session_state["confirmed_toc_text"] = refined
 
         st.success("TOC refined.")
